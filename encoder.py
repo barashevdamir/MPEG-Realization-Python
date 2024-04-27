@@ -3,6 +3,7 @@ import numpy as np
 import cv2
 import os
 from determine_frames_types import get_frame_types, calculate_optical_flow_farneback
+from adaptive_huffman import AdaptiveHuffmanTree
 from huffman import huffman_encoding
 import json
 import math
@@ -55,7 +56,8 @@ def extract_frames(folder_path: str, height: int, width: int) -> list:
     frames = []
 
     # Цикл по номерам кадров
-    for i in range(21, 30):
+    # for i in range(21, 30):
+    for i in range(65, 96):
         # Формируем имя файла RAW
         file_path = os.path.join(folder_path, f'frame_{i}.RAW')
         file_size = os.path.getsize(file_path)
@@ -93,7 +95,7 @@ def convert_frames_to_yuv(frames: list) -> list:
 
         yuv_frame = np.dot(frame.reshape(-1, 3), transform_matrix.T) + offset
         yuv_frame = np.clip(yuv_frame, 0, 255)
-        yuv_frame = yuv_frame.reshape(frame.shape).astype(np.float32)
+        yuv_frame = yuv_frame.reshape(frame.shape).astype(np.uint8)
         yuv_frames.append(yuv_frame)
 
     return yuv_frames
@@ -230,6 +232,10 @@ def encode_i_frame(frame: np.ndarray, quant_matrix: np.ndarray) -> np.ndarray:
     height, width = frame.shape[:2]
     all_rle_blocks = []  # Список для хранения RLE закодированных блоков
     all_data_for_huffman = []  # Список для сбора данных всех блоков для Хаффмана
+    encoded_blocks = []
+    huffman_table = {}
+
+    tree = AdaptiveHuffmanTree()
 
     # Обработка и сбор данных из каждого блока
     for i in range(0, height, 8):
@@ -241,6 +247,19 @@ def encode_i_frame(frame: np.ndarray, quant_matrix: np.ndarray) -> np.ndarray:
             rle_block = run_length_encode(zigzagged_block)
             all_rle_blocks.append(rle_block)
             all_data_for_huffman.extend(rle_block)
+            #
+            # encoded_block = ""
+            # block_table = tree.encode(rle_block)
+            # huffman_table.update(block_table)
+            #
+            # for value, count in rle_block:
+            #     key = (value, count)
+            #     code = huffman_table.get(key, 'ERROR')  # Безопасно извлекаем код
+            #     if code == 'ERROR':
+            #         print("ERROR")
+            #     encoded_block += code
+            #
+            # encoded_blocks.append(encoded_block)
 
     # Создание общей таблицы Хаффмана для всех блоков кадра
     huffman_table = huffman_encoding(all_data_for_huffman)
@@ -255,6 +274,7 @@ def encode_i_frame(frame: np.ndarray, quant_matrix: np.ndarray) -> np.ndarray:
                 print("ERROR")
             encoded_block += code
         encoded_blocks.append(encoded_block)
+
 
     return encoded_blocks, huffman_table
 
@@ -514,20 +534,6 @@ def pack_to_file(
     # with open(file_path, "w") as file:
     #     json.dump(prepared_data, file)
 
-def write_json_to_binary_file(json_file_path: str, binary_file_path: str) -> None:
-    """
-    Записывает JSON-файл в бинарный файл.
-
-    :param json_file_path: Путь к JSON-файлу
-    :param binary_file_path: Путь к бинарному файлу
-    :return: None
-    """
-    with open(json_file_path, 'r') as json_file:
-        json_data = json.load(json_file)
-
-    with open(binary_file_path, 'wb') as binary_file:
-        json.dump(json_data, binary_file)
-
 
 def pack_encoded_data_to_mdat_content(encoded_frames: list, huffman_tables_list: list) -> bytearray:
     """
@@ -626,7 +632,7 @@ def compare_folder_and_file_size(folder_path: str, file_path: str) -> int:
 if __name__ == '__main__':
 
     folder_path = 'data/frames/'
-    height, width = 1920, 1080
+    height, width = 240, 320
     frames = extract_frames(folder_path, height, width)
     frames_yuv = convert_frames_to_yuv(frames)
 
