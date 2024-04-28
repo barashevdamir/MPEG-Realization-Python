@@ -126,6 +126,23 @@ def apply_subsampling(frames: list) -> list:
 
     return subsampled_frames
 
+def apply_no_subsampling(frames: list) -> list:
+    """
+    Применяет субдискретизацию 4:2:0 ко всем кадрам в списке.
+
+    :param frames: Список кадров в формате YUV
+    :return: Список кадров после субдискретизации с уменьшенными U и V каналами
+    """
+    subsampled_frames = []
+
+    for yuv_frame in frames:
+        # Разделяем каналы
+        y, u, v = cv2.split(yuv_frame)
+        # Сохраняем каналы как отдельные элементы списка
+        subsampled_frames.append((y, u, v))
+
+    return subsampled_frames
+
 def pad_block_to_8x8(block: np.ndarray) -> np.ndarray:
     """
     Дополняет блок до размера 8x8, используя нулевое заполнение.
@@ -642,10 +659,14 @@ if __name__ == '__main__':
 
     subsampled_frames = apply_subsampling(frames_yuv)
 
+    # subsampled_frames = apply_no_subsampling(frames_yuv)
+
     # Создаем список, содержащий только каналы Y из субдискретизированных кадров
     y_frames = [frame[0] for frame in subsampled_frames]
 
     frame_types = get_frame_types(y_frames)
+
+    print(f'Типы кадров: {frame_types}')
 
     encoded_frames, huffman_tables_list = encode_sequence(subsampled_frames, frame_types, quant_matrix_Y,
                                                           quant_matrix_UV)

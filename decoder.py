@@ -8,26 +8,29 @@ import os
 import numpy as np
 
 
-def convert_frames_to_rgb(frames: list) -> list:
+
+def convert_frames_to_rgb(yuv_frames: list) -> list:
     """
     Конвертирует кадры из формата YUV в RGB.
 
-    :param frames: Список кадров в формате YUV
+    :param yuv_frames: Список кадров в формате YUV
     :return: Список кадров в формате RGB
     """
-    # Матрица преобразования YUV в RGB
-    transform_matrix = np.array([
-        [1.0, 0.0, 1.402],
-        [1.0, -0.344136, -0.714136],
-        [1.0, 1.772, 0.0]
-    ])
-    offset = np.array([-179.456, 135.45984, -226.816])
-
+    # Обратная матрица преобразования
+    inverse_transform_matrix = np.linalg.inv(np.array([
+        [0.229, 0.587, 0.144],
+        [0.5, -0.4187, -0.0813],
+        [0.1687, -0.3313, 0.5]
+    ]))
+    offset = np.array([0, 128, 128])
     rgb_frames = []
-    for frame in frames:
-        rgb_frame = np.dot(frame.reshape(-1, 3) + offset, transform_matrix.T)
+    for yuv_frame in yuv_frames:
+        # Применяем обратное преобразование
+        normalized_frame = yuv_frame.astype(np.float32) - offset
+        rgb_frame = np.dot(normalized_frame.reshape(-1, 3), inverse_transform_matrix.T)
         rgb_frame = np.clip(rgb_frame, 0, 255)
-        rgb_frame = rgb_frame.reshape(frame.shape).astype(np.uint8)
+        rgb_frame = rgb_frame.reshape(yuv_frame.shape).astype(np.uint8)
+
         rgb_frames.append(rgb_frame)
 
     return rgb_frames
@@ -202,6 +205,8 @@ def decode_sequence(
     for index, ((encoded_y, encoded_u, encoded_v), (huffman_table_y, huffman_table_u, huffman_table_v), frame_type) in enumerate(zip(encoded_frames, huffman_tables_list, frame_types)):
         # Декомпрессия разности для Y, U, V каналов
         diff_y = process_and_decompress_frame(encoded_y, quant_matrix_Y, huffman_table_y, frame_shape) if encoded_y else np.zeros(frame_shape, dtype=np.float32)
+        # diff_u = process_and_decompress_frame(encoded_u, quant_matrix_UV, huffman_table_u, frame_shape) if any(encoded_u) else np.zeros((frame_shape[0]//2, frame_shape[1]//2), dtype=np.float32)
+        # diff_v = process_and_decompress_frame(encoded_v, quant_matrix_UV, huffman_table_v, frame_shape) if any(encoded_v) else np.zeros((frame_shape[0]//2, frame_shape[1]//2), dtype=np.float32)
         diff_u = process_and_decompress_frame(encoded_u, quant_matrix_UV, huffman_table_u, (frame_shape[0]//2, frame_shape[1]//2)) if any(encoded_u) else np.zeros((frame_shape[0]//2, frame_shape[1]//2), dtype=np.float32)
         diff_v = process_and_decompress_frame(encoded_v, quant_matrix_UV, huffman_table_v, (frame_shape[0]//2, frame_shape[1]//2)) if any(encoded_v) else np.zeros((frame_shape[0]//2, frame_shape[1]//2), dtype=np.float32)
 
@@ -225,8 +230,8 @@ def decode_sequence(
 
         # Объединение каналов Y, U, V в YUV кадр и его преобразование в BGR для отображения
         yuv_frame = cv2.merge([y.astype(np.uint8), u.astype(np.uint8), v.astype(np.uint8)])
-        frame = cv2.cvtColor(yuv_frame, cv2.COLOR_YUV2BGR)
-        decoded_frames.append(frame)
+        # frame = cv2.cvtColor(yuv_frame, cv2.COLOR_YUV2BGR)
+        decoded_frames.append(yuv_frame)
 
         # Обновление ссылки на последний декодированный YUV-кадр
         prev_decoded_yuv = yuv_frame
@@ -423,7 +428,7 @@ def load_and_decode_sequence(file_path: str) -> list:
     decoded_frames = decode_sequence(encoded_frames, huffman_tables_list, frame_types, quant_matrix_Y, quant_matrix_UV,
                                      frame_shape)
 
-    # rgb_frames = convert_frames_to_rgb(decoded_frames)
+    decoded_frames = convert_frames_to_rgb(decoded_frames)
 
     return decoded_frames
 
