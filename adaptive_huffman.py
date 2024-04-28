@@ -68,9 +68,22 @@ class AdaptiveHuffmanTree:
                 result[(symbol, count)] = code
         return result
 
+    def get_huffman_table(self):
+        huffman_table = {}
+        self._build_table(self.root, "", huffman_table)
+        return huffman_table
+
+    def _build_table(self, node, code, table):
+        if node.is_leaf():
+            table[node.symbol] = code
+        else:
+            if node.left:
+                self._build_table(node.left, code + '0', table)
+            if node.right:
+                self._build_table(node.right, code + '1', table)
+
 # # Пример использования
 # tree = AdaptiveHuffmanTree()
-# data = [(1.0, 1), (2.0, 1), (1.0, 1), (3.0, 1)]
+# data = [[(1.0, 1), (2.0, 1), (1.0, 1), (3.0, 1)], [(4.0, 1), (5.0, 1), (1.0, 1)]]
 # encoded_data = tree.encode(data)
 # print("Encoded:", encoded_data)
-# print(tree)

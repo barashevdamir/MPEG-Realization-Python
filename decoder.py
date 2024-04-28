@@ -1,12 +1,10 @@
 import ast
-
-import imageio
-import numpy as np
+import gzip
+import pickle
+import imageio.v2 as imageio
 import cv2
 from huffman import huffman_decoding
-import json
 import os
-
 import numpy as np
 
 
@@ -353,29 +351,55 @@ def predict_b_frame(
 
 
 
-def unpack_from_file(file_path: str) -> tuple:
+# def unpack_from_file(file_path: str) -> tuple:
+#     """
+#     Загружает закодированные данные, таблицы Хаффмана, размеры кадра и типы кадров из файла.
+#
+#     :param file_path: Путь к файлу с закодированными данными.
+#     :return: Закодированные данные, таблицы Хаффмана, размеры кадра и типы кадров.
+#     """
+#     # with open(file_path, "r") as file:
+#     #     data_loaded = json.load(file)
+#
+#     with open(file_path, 'rb') as f:
+#         binary_data = f.read()
+#         json_string = binary_data.decode('utf-8')
+#         data_loaded = json.loads(json_string)
+#
+#     quant_matrix_Y = np.array(data_loaded["quant_matrix_Y"])
+#     quant_matrix_UV = np.array(data_loaded["quant_matrix_UV"])
+#     encoded_frames = [tuple(frame) for frame in data_loaded["encoded_frames"]]  # Преобразование списков в кортежи
+#
+#     huffman_tables = []
+#     for table_list in data_loaded["huffman_tables"]:
+#         huffman_tables.append(table_list)
+#
+#     height = data_loaded["height"]
+#     width = data_loaded["width"]
+#     frame_types = data_loaded["frame_types"]
+#
+#     return encoded_frames, huffman_tables, height, width, frame_types, quant_matrix_Y, quant_matrix_UV
+
+def unpack_from_file(file_path: str):
     """
-    Загружает закодированные данные, таблицы Хаффмана, размеры кадра и типы кадров из файла.
+    Распаковать данные из файла.
 
-    :param file_path: Путь к файлу с закодированными данными.
-    :return: Закодированные данные, таблицы Хаффмана, размеры кадра и типы кадров.
+    :param file_path: Путь к бинарному файлу
+    :return: Кортеж с распакованными данными
     """
-    # with open(file_path, "r") as file:
-    #     data_loaded = json.load(file)
+    # Чтение данных из файла
+    with open(file_path, 'rb') as file:
+        compressed_data = file.read()
+    #
+    # Распаковка данных
+    serialized_data = gzip.decompress(compressed_data)
+    data_loaded = pickle.loads(serialized_data)
 
-    with open(file_path, 'rb') as f:
-        binary_data = f.read()
-        json_string = binary_data.decode('utf-8')
-        data_loaded = json.loads(json_string)
-
+    # Распаковка отдельных компонентов данных
     quant_matrix_Y = np.array(data_loaded["quant_matrix_Y"])
     quant_matrix_UV = np.array(data_loaded["quant_matrix_UV"])
-    encoded_frames = [tuple(frame) for frame in data_loaded["encoded_frames"]]  # Преобразование списков в кортежи
-
-    huffman_tables = []
-    for table_list in data_loaded["huffman_tables"]:
-        huffman_tables.append(table_list)
-
+    encoded_frames = [tuple(frame) for frame in data_loaded["encoded_frames"]]
+    huffman_tables = data_loaded["huffman_tables"]
     height = data_loaded["height"]
     width = data_loaded["width"]
     frame_types = data_loaded["frame_types"]
@@ -422,13 +446,12 @@ def save_decoded_frames(
     for i, frame in enumerate(decoded_frames):
         filename = os.path.join(save_folder, f"frame_{i:03d}.png")
         cv2.imwrite(filename, frame)
-        print(f"Saved {filename}")
 
     # Создаем анимацию GIF из сохраненных кадров
     frame_files = sorted([f for f in os.listdir(save_folder) if f.endswith('.png')])
     images = [imageio.imread(os.path.join(save_folder, filename)) for filename in frame_files]
     imageio.mimsave(gif_filename, images, fps=fps)
-    print(f"GIF saved as {gif_filename}")
+    print(f"Сохраняю GIF-анимацию выходных данных с именем '{gif_filename}'")
 
 
 def play_video(frames: list) -> None:

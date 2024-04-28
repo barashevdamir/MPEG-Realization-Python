@@ -1,4 +1,6 @@
-import imageio
+import gzip
+import pickle
+import imageio.v2 as imageio
 import numpy as np
 import cv2
 import os
@@ -7,6 +9,7 @@ from adaptive_huffman import AdaptiveHuffmanTree
 from huffman import huffman_encoding
 import json
 import math
+from utils import quant_matrix_Y, quant_matrix_UV
 
 
 def dct(block: np.ndarray) -> np.ndarray:
@@ -56,8 +59,8 @@ def extract_frames(folder_path: str, height: int, width: int) -> list:
     frames = []
 
     # Цикл по номерам кадров
-    # for i in range(21, 30):
-    for i in range(65, 96):
+    for i in range(21, 30):
+    # for i in range(65, 96):
         # Формируем имя файла RAW
         file_path = os.path.join(folder_path, f'frame_{i}.RAW')
         file_size = os.path.getsize(file_path)
@@ -247,19 +250,6 @@ def encode_i_frame(frame: np.ndarray, quant_matrix: np.ndarray) -> np.ndarray:
             rle_block = run_length_encode(zigzagged_block)
             all_rle_blocks.append(rle_block)
             all_data_for_huffman.extend(rle_block)
-            #
-            # encoded_block = ""
-            # block_table = tree.encode(rle_block)
-            # huffman_table.update(block_table)
-            #
-            # for value, count in rle_block:
-            #     key = (value, count)
-            #     code = huffman_table.get(key, 'ERROR')  # Безопасно извлекаем код
-            #     if code == 'ERROR':
-            #         print("ERROR")
-            #     encoded_block += code
-            #
-            # encoded_blocks.append(encoded_block)
 
     # Создание общей таблицы Хаффмана для всех блоков кадра
     huffman_table = huffman_encoding(all_data_for_huffman)
@@ -524,15 +514,27 @@ def pack_to_file(
         "quant_matrix_Y": quant_matrix_Y_list,
         "quant_matrix_UV": quant_matrix_UV_list,
     })
-    # Запись данных в бинарный файл
-    with open('data.bin', 'wb') as f:
-        dumped_json_string = json.dumps(prepared_data)
-        binary_string = dumped_json_string.encode('utf-8')
-        f.write(binary_string)
+    # Сериализация данных в байты с использованием pickle
+    serialized_data = pickle.dumps(prepared_data)
+
+    # Сжатие данных
+    compressed_data = gzip.compress(serialized_data)
+
+    # Запись данных в файл в бинарном режиме
+    with open(file_path, 'wb') as file:
+        file.write(compressed_data)
+
+    print(f"Данные успешно записаны в файл '{file_path}'")
+    # # Запись данных в бинарный файл
+    # with open('data.bin', 'wb') as f:
+    #     dumped_json_string = json.dumps(prepared_data)
+    #     binary_string = dumped_json_string.encode('utf-8')
+    #     f.write(binary_string)
     #
-    # # Сериализация подготовленных данных в JSON
-    # with open(file_path, "w") as file:
-    #     json.dump(prepared_data, file)
+    # Сериализация подготовленных данных в JSON
+    with open('output_file.json', "w") as file:
+        json.dump(prepared_data, file)
+
 
 
 def pack_encoded_data_to_mdat_content(encoded_frames: list, huffman_tables_list: list) -> bytearray:
@@ -590,13 +592,12 @@ def save_encoded_frames(encoded_frames, save_folder, gif_filename='input_animati
     for i, frame in enumerate(encoded_frames):
         filename = os.path.join(save_folder, f"frame_{i:03d}.png")
         cv2.imwrite(filename, frame)
-        print(f"Saved {filename}")
 
     # Создаем анимацию GIF из сохраненных кадров
     frame_files = sorted([f for f in os.listdir(save_folder) if f.endswith('.png')])
     images = [imageio.imread(os.path.join(save_folder, filename)) for filename in frame_files]
     imageio.mimsave(gif_filename, images, fps=fps)
-    print(f"GIF saved as {gif_filename}")
+    print(f"Сохраняю GIF-анимацию входных данных с именем '{gif_filename}'")
 
 
 def get_folder_size(folder_path: str) -> int:
@@ -632,7 +633,8 @@ def compare_folder_and_file_size(folder_path: str, file_path: str) -> int:
 if __name__ == '__main__':
 
     folder_path = 'data/frames/'
-    height, width = 240, 320
+    # height, width = 240, 320
+    height, width = 1920, 1080
     frames = extract_frames(folder_path, height, width)
     frames_yuv = convert_frames_to_yuv(frames)
 
@@ -645,35 +647,13 @@ if __name__ == '__main__':
 
     frame_types = get_frame_types(y_frames)
 
-    quant_matrix_Y = np.array([
-        [2, 2, 3, 4, 5, 6, 8, 11],
-        [2, 2, 2, 4, 5, 7, 9, 11],
-        [3, 2, 3, 5, 7, 9, 11, 12],
-        [4, 4, 5, 7, 9, 11, 12, 12],
-        [5, 5, 7, 9, 11, 12, 12, 12],
-        [6, 7, 9, 11, 12, 12, 12, 12],
-        [8, 9, 11, 12, 12, 12, 12, 12],
-        [11, 11, 12, 12, 12, 12, 12, 12]
-    ])
-
-    quant_matrix_UV = np.array([
-        [3, 3, 7, 13, 15, 15, 15, 15],
-        [3, 4, 7, 13, 14, 12, 12, 12],
-        [7, 7, 13, 14, 12, 12, 12, 12],
-        [13, 13, 14, 12, 12, 12, 12, 12],
-        [15, 14, 12, 12, 12, 12, 12, 12],
-        [15, 12, 12, 12, 12, 12, 12, 12],
-        [15, 12, 12, 12, 12, 12, 12, 12],
-        [15, 12, 12, 12, 12, 12, 12, 12]
-    ])
-
     encoded_frames, huffman_tables_list = encode_sequence(subsampled_frames, frame_types, quant_matrix_Y,
                                                           quant_matrix_UV)
 
     pack_to_file(
         encoded_frames,
         huffman_tables_list,
-        "output_file.json",
+        "data.bin",
         height,
         width,
         frame_types,
@@ -681,4 +661,4 @@ if __name__ == '__main__':
         quant_matrix_UV,
     )
 
-    print(compare_folder_and_file_size("data/frames", "data.bin"))
+    print('Коэффициент сжатия: ', compare_folder_and_file_size("data/frames", "data.bin"))
