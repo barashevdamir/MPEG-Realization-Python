@@ -1,13 +1,44 @@
 import ast
 import gzip
+import math
 import pickle
+import sys
+from typing import Tuple, List
+
 import imageio.v2 as imageio
 import cv2
 from huffman import huffman_decoding
 import os
 import numpy as np
+from utils import print_progress_bar
 
 
+def median_filter(input_frame: np.ndarray, kernel_size: int) -> np.ndarray:
+    """
+    Применяет фильтр медианного ядра к входному изображению.
+
+    :param input_frame: Входящее изображение
+    :param kernel_size: Размер ядра
+    :return: Измененное изображение
+    """
+    # Размеры входного массива
+    height, width = input_frame.shape[:2]
+    # Половина размера ядра для удобства
+    k = kernel_size // 2
+    # Создание копии массива для вывода результата
+    output_frame = np.zeros((height, width, 3), dtype=np.uint8)
+
+    # Проход по всем пикселям изображения, кроме краев, которые не обрабатываются
+    for i in range(k, height - k):
+        for j in range(k, width - k):
+            # Извлечение окна вокруг пикселя
+            window = input_frame[i - k: i + k + 1, j - k: j + k + 1]
+            # Вычисление медианы для каждого канала цвета
+            median = np.median(window, axis=(0, 1))
+            # Запись медианы в центр окна в результате
+            output_frame[i, j] = median
+
+    return output_frame
 
 def convert_frames_to_rgb(yuv_frames: list) -> list:
     """
@@ -86,6 +117,39 @@ def zigzag_scan_inverse(arr: list) -> np.ndarray:
                 index += 1
     return matrix
 
+def idct(dct_block: np.ndarray) -> np.ndarray:
+    """
+    Вычисляет двумерное обратное дискретное косинусное преобразование (IDCT) для данного блока.
+    IDCT преобразует блок из частотной области обратно в пространственную.
+
+    param dct_block: Входящий блок
+    return: Выходной блок
+
+    """
+
+    N, M = dct_block.shape
+    output_block = np.zeros((N, M))
+
+    for i in range(N):
+        for j in range(M):
+            sum = 0
+            for u in range(N):
+                for v in range(M):
+                    # Нормализация коэффициентов
+                    if u == 0:
+                        cu = 1 / math.sqrt(N)
+                    else:
+                        cu = math.sqrt(2) / math.sqrt(N)
+                    if v == 0:
+                        cv = 1 / math.sqrt(M)
+                    else:
+                        cv = math.sqrt(2) / math.sqrt(M)
+
+                    sum += cu * cv * dct_block[u, v] * math.cos((math.pi * u * (2 * i + 1)) / (2 * N)) * math.cos(
+                        (math.pi * v * (2 * j + 1)) / (2 * M))
+            output_block[i, j] = sum
+
+    return output_block
 
 
 def dct_quantize_block_inverse(quantized_block: np.ndarray, quant_matrix: np.ndarray) -> np.ndarray:
@@ -99,6 +163,8 @@ def dct_quantize_block_inverse(quantized_block: np.ndarray, quant_matrix: np.nda
     dequantized_block = quantized_block * quant_matrix
     # Применяем обратное DCT
     block = cv2.idct(dequantized_block.astype(np.float32))
+    # block = idct(dequantized_block.astype(np.float32))
+
     return block
 
 def reconstruct_frame_from_blocks(blocks: list, frame_shape: tuple) -> np.ndarray:
@@ -203,6 +269,8 @@ def decode_sequence(
     prev_decoded_yuv = None  # Для хранения предыдущего декодированного YUV-кадра
 
     for index, ((encoded_y, encoded_u, encoded_v), (huffman_table_y, huffman_table_u, huffman_table_v), frame_type) in enumerate(zip(encoded_frames, huffman_tables_list, frame_types)):
+        print_progress_bar(index * 100 / len(frame_types), 100, prefix='Происходит декодирование кадров:', suffix='Готово',
+                           length=50)
         # Декомпрессия разности для Y, U, V каналов
         diff_y = process_and_decompress_frame(encoded_y, quant_matrix_Y, huffman_table_y, frame_shape) if encoded_y else np.zeros(frame_shape, dtype=np.float32)
         # diff_u = process_and_decompress_frame(encoded_u, quant_matrix_UV, huffman_table_u, frame_shape) if any(encoded_u) else np.zeros((frame_shape[0]//2, frame_shape[1]//2), dtype=np.float32)
@@ -449,6 +517,14 @@ def save_decoded_frames(
         os.makedirs(save_folder)
 
     for i, frame in enumerate(decoded_frames):
+        print_progress_bar(i + 1, len(decoded_frames), prefix='Сохраняю кадры:', suffix='Готово', length=50)
+        # # Применение билатерального (двустороннего) фильтра к кадру
+        # frame = cv2.bilateralFilter(frame, 8, 50, 50)
+        # Применение медианного фильтра к кадру
+        # blurred = median_filter(frame, 5)
+        blurred = cv2.medianBlur(frame, 5)
+        gaussian = cv2.GaussianBlur(blurred, (9, 9), 10.0)
+        frame = cv2.addWeighted(blurred, 1.5, gaussian, -0.5, 0, frame)
         filename = os.path.join(save_folder, f"frame_{i:03d}.png")
         cv2.imwrite(filename, frame)
 
@@ -456,7 +532,7 @@ def save_decoded_frames(
     frame_files = sorted([f for f in os.listdir(save_folder) if f.endswith('.png')])
     images = [imageio.imread(os.path.join(save_folder, filename)) for filename in frame_files]
     imageio.mimsave(gif_filename, images, fps=fps)
-    print(f"Сохраняю GIF-анимацию выходных данных с именем '{gif_filename}'")
+    sys.stderr.write(f"Сохраняю GIF-анимацию выходных данных с именем '{gif_filename}'\n")
 
 
 def play_video(frames: list) -> None:
@@ -474,10 +550,83 @@ def play_video(frames: list) -> None:
             break
     cv2.destroyAllWindows()
 
+def calculate_psnr(img1: np.ndarray, img2: np.ndarray) -> float:
+    """
+    Вычисляет PSNR между двумя изображениями.
+
+    :param img1: Первое изображение.
+    :param img2: Второе изображение.
+    :return: PSNR между двумя изображениями.
+    """
+    mse = np.mean((img1 - img2) ** 2)
+    if mse == 0:
+        return float('inf')
+    pixel_max = 255.0
+    psnr = 20 * np.log10(pixel_max / np.sqrt(mse))
+    return psnr
+
+
+def process_sequence_psnr_and_degradation(original_folder: str, encoded_folder: str) -> Tuple[float, List[float], float, List[float]]:
+    """
+    Вычисляет PSNR и процент деградации между изображениями в указанных директориях.
+
+    :param original_folder: Папка с исходными изображениями.
+    :param encoded_folder: Папка с закодированными изображениями.
+    :return: Среднее значение PSNR, список значений PSNR, среднее значение процентной деградации и список процентов деградации для каждого изображения.
+    """
+    original_files = sorted(os.listdir(original_folder))
+    encoded_files = sorted(os.listdir(encoded_folder))
+
+    psnr_list = []
+    degradation_list = []
+
+    for orig_file, enc_file in zip(original_files, encoded_files):
+        orig_path = os.path.join(original_folder, orig_file)
+        enc_path = os.path.join(encoded_folder, enc_file)
+
+        # Загрузка изображений
+        orig_img = cv2.imread(orig_path)
+        enc_img = cv2.imread(enc_path)
+
+        if orig_img is None or enc_img is None:
+            continue
+
+        # Вычисление PSNR
+        psnr = calculate_psnr(orig_img, enc_img)
+        psnr_list.append(psnr)
+
+        # Проверка и вычисление процентной деградации
+        original_psnr = calculate_psnr(orig_img, orig_img)
+        if original_psnr != 0 and not np.isinf(original_psnr):  # Проверяем, что original_psnr действительный и не бесконечность
+            degradation = (original_psnr - psnr) / original_psnr * 100
+            degradation_list.append(degradation)
+        else:
+            degradation = 0  # Если original_psnr бесконечность, деградация не определена
+            degradation_list.append(degradation)
+
+        sys.stderr.write(f"PSNR для {orig_file} и {enc_file}: {psnr} \n")
+        sys.stderr.write(f"Процент деградации для {orig_file} и {enc_file}: {degradation:.2f}% \n")
+
+    # Средние значения PSNR и процентной деградации
+    if psnr_list and degradation_list:
+        average_psnr = sum(psnr_list) / len(psnr_list)
+        average_degradation = sum(degradation_list) / len(degradation_list)
+        sys.stderr.write(f"Среднее значение PSNR для всей последовательности: {average_psnr} \n")
+        sys.stderr.write(f"Средний процент деградации для всей последовательности: {average_degradation:.2f}% \n")
+        return average_psnr, psnr_list, average_degradation, degradation_list
+    else:
+        sys.stderr.write("Нет валидных изображений в директориях. \n")
+        return None, [], None, []
+
+
 
 if __name__ == '__main__':
-    print("Начинаю процесс декодирования видео...")
+    sys.stderr.write("Начинаю процесс декодирования видео...\n")
     decoded_frames = load_and_decode_sequence('data.bin')
-    decoded_frames_path = "data/decoded_frames/"
-    print(f"Декодирование завершено. Сохраняю результаты в папку '{decoded_frames_path}'...")
-    save_decoded_frames(decoded_frames, decoded_frames_path)
+    # Пути к папкам с оригинальными и декодированными изображениями
+    encoded_folder = 'data/encoded_frames/'
+    decoded_folder = 'data/decoded_frames/'
+    save_decoded_frames(decoded_frames, decoded_folder)
+    sys.stderr.write(f"Начинаю вычислять PSNR между оригинальными и декодированными изображениями: \n")
+    # Вычисление PSNR и коэффициента деградации
+    average_psnr, psnr_list, average_degradation, degradation_list = process_sequence_psnr_and_degradation(encoded_folder, decoded_folder)

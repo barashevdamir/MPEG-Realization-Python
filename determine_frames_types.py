@@ -111,7 +111,8 @@ def determine_frame_type(
 
     # Если текущий кадр может быть хорошо предсказан и из предыдущего, и из следующего кадра, считаем его B-кадром
     if avg_flow_magnitude_prev <= threshold_flow and avg_flow_magnitude_next <= threshold_flow and sad_prev < threshold_sad and sad_next < threshold_sad:
-        return 'B'
+        # return 'B'
+        return 'P'
     # Если текущий кадр хорошо предсказывается из предыдущего кадра, считаем его P-кадром
     elif sad_prev < threshold_sad or avg_flow_magnitude_prev < threshold_b_frame:
         return 'P'
@@ -158,7 +159,6 @@ def get_frame_types(frames: list) -> list:
     for i in range(1, len(frames)):
         frame_types.append('I')
 
-
     # # Первый кадр уже помечен как I-кадр
     # for i in range(1, len(frames) - 1):
     #     if i % 10 == 0:
@@ -176,9 +176,9 @@ def get_frame_types(frames: list) -> list:
     #             frame_types.append('P')
     #         else:
     #             frame_types.append(frame_type)
-    #
-    # last_frame_type = determine_last_frame_type(frames[-2], frames[-1], adaptive_threshold_sad, adaptive_threshold_flow)
-    # frame_types.append(last_frame_type)
+
+    last_frame_type = determine_last_frame_type(frames[-2], frames[-1], adaptive_threshold_sad, adaptive_threshold_flow)
+    frame_types.append(last_frame_type)
     return frame_types
 
 
