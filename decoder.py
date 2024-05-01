@@ -11,6 +11,9 @@ from huffman import huffman_decoding
 import os
 import numpy as np
 from utils import print_progress_bar
+from skimage import io
+import matplotlib.pyplot as plt
+from skimage.metrics import structural_similarity as ssim
 
 
 def median_filter(input_frame: np.ndarray, kernel_size: int) -> np.ndarray:
@@ -566,58 +569,127 @@ def calculate_psnr(img1: np.ndarray, img2: np.ndarray) -> float:
     return psnr
 
 
-def process_sequence_psnr_and_degradation(original_folder: str, encoded_folder: str) -> Tuple[float, List[float], float, List[float]]:
+def calculate_quality_degradation(original_image_path: str, compressed_image_path: str, baseline_image_path: str) -> float:
+    """
+    Вычисляет процент деградации качества между изображениями.
+
+    :param original_image_path: Путь к оригинальному изображению.
+    :param compressed_image_path: Путь к сжатому изображению.
+    :param baseline_image_path: Путь к базовому изображению.
+    :return: Процент деградации качества.
+    """
+
+    # Загрузка изображений
+    original_image = cv2.imread(original_image_path, cv2.IMREAD_GRAYSCALE)
+    compressed_image = cv2.imread(compressed_image_path, cv2.IMREAD_GRAYSCALE)
+    baseline_image = cv2.imread(baseline_image_path, cv2.IMREAD_GRAYSCALE)
+
+    if original_image is None or compressed_image is None or baseline_image is None:
+        raise ValueError("Одно или несколько изображений не удалось загрузить.")
+
+    min_size = min(original_image.shape[0], original_image.shape[1], 7)
+    win_size = min_size if min_size % 2 == 1 else min_size - 1
+
+    ssim_baseline = ssim(original_image, baseline_image, win_size=win_size)
+    ssim_compressed = ssim(original_image, compressed_image, win_size=win_size)
+
+    # Вычисление процентной деградации качества
+    quality_degradation = ((ssim_baseline - ssim_compressed) / ssim_baseline) * 100
+    return ssim_compressed, quality_degradation
+
+
+def process_sequence_psnr_and_degradation(original_folder: str, encoded_folder: str, q90_folder: str) -> Tuple[float, List[float], float, List[float]]:
     """
     Вычисляет PSNR и процент деградации между изображениями в указанных директориях.
 
     :param original_folder: Папка с исходными изображениями.
     :param encoded_folder: Папка с закодированными изображениями.
+    :param q90_folder: Папка с изображениями с качеством 90%
     :return: Среднее значение PSNR, список значений PSNR, среднее значение процентной деградации и список процентов деградации для каждого изображения.
     """
     original_files = sorted(os.listdir(original_folder))
     encoded_files = sorted(os.listdir(encoded_folder))
+    q90_files = sorted(os.listdir(q90_folder))
 
     psnr_list = []
+    ssim_list = []
     degradation_list = []
 
-    for orig_file, enc_file in zip(original_files, encoded_files):
+    for orig_file, enc_file, q90_file in zip(original_files, encoded_files, q90_files):
         orig_path = os.path.join(original_folder, orig_file)
         enc_path = os.path.join(encoded_folder, enc_file)
+        q90_path = os.path.join(q90_folder, q90_file)
 
         # Загрузка изображений
         orig_img = cv2.imread(orig_path)
         enc_img = cv2.imread(enc_path)
+        q90_img = cv2.imread(q90_path)
 
-        if orig_img is None or enc_img is None:
+        if orig_img is None or enc_img is None or q90_img is None:
             continue
 
         # Вычисление PSNR
         psnr = calculate_psnr(orig_img, enc_img)
         psnr_list.append(psnr)
 
-        # Проверка и вычисление процентной деградации
-        original_psnr = calculate_psnr(orig_img, orig_img)
-        if original_psnr != 0 and not np.isinf(original_psnr):  # Проверяем, что original_psnr действительный и не бесконечность
-            degradation = (original_psnr - psnr) / original_psnr * 100
-            degradation_list.append(degradation)
-        else:
-            degradation = 0  # Если original_psnr бесконечность, деградация не определена
-            degradation_list.append(degradation)
+        ssim, degradation = calculate_quality_degradation(orig_path, enc_path, q90_path)
+        ssim_list.append(ssim)
+        degradation_list.append(degradation)
 
-        sys.stderr.write(f"PSNR для {orig_file} и {enc_file}: {psnr} \n")
+        sys.stderr.write(f"PSNR для {orig_file} и {enc_file}: {psnr:.2f} \n")
+        sys.stderr.write(f"SSIM для {orig_file} и {enc_file}: {ssim:.2f} \n")
         sys.stderr.write(f"Процент деградации для {orig_file} и {enc_file}: {degradation:.2f}% \n")
 
     # Средние значения PSNR и процентной деградации
-    if psnr_list and degradation_list:
+    if psnr_list and degradation_list and ssim_list:
         average_psnr = sum(psnr_list) / len(psnr_list)
         average_degradation = sum(degradation_list) / len(degradation_list)
+        average_ssim = sum(ssim_list) / len(ssim_list)
         sys.stderr.write(f"Среднее значение PSNR для всей последовательности: {average_psnr} \n")
         sys.stderr.write(f"Средний процент деградации для всей последовательности: {average_degradation:.2f}% \n")
-        return average_psnr, psnr_list, average_degradation, degradation_list
+        sys.stderr.write(f"Средний SSIM для всей последовательности: {average_ssim:.2f} \n")
+        return average_psnr, psnr_list, average_degradation, degradation_list, average_ssim, ssim_list
     else:
         sys.stderr.write("Нет валидных изображений в директориях. \n")
         return None, [], None, []
 
+    plot_metrics(psnr_list, ssim_list, degradation_list, file_names)
+
+
+def plot_metrics(psnr_list, ssim_list, degradation_list, file_names):
+    """
+    Построение графиков для PSNR, SSIM и процента деградации.
+
+    :param psnr_list: Список значений PSNR.
+    :param ssim_list: Список значений SSIM.
+    :param degradation_list: Список значений процентной деградации.
+    :param file_names: Список имен файлов.
+    """
+    fig, ax = plt.subplots(3, 1, figsize=(10, 15))
+
+    # График PSNR
+    ax[0].plot(file_names, psnr_list, marker='o', linestyle='-', color='b')
+    ax[0].set_title("PSNR over Images")
+    ax[0].set_xlabel("Image")
+    ax[0].set_ylabel("PSNR (dB)")
+    ax[0].grid(True)
+
+    # График SSIM
+    ax[1].plot(file_names, ssim_list, marker='o', linestyle='-', color='r')
+    ax[1].set_title("SSIM over Images")
+    ax[1].set_xlabel("Image")
+    ax[1].set_ylabel("SSIM")
+    ax[1].grid(True)
+
+    # График процента деградации
+    ax[2].plot(file_names, degradation_list, marker='o', linestyle='-', color='g')
+    ax[2].set_title("Quality Degradation over Images")
+    ax[2].set_xlabel("Image")
+    ax[2].set_ylabel("Degradation (%)")
+    ax[2].grid(True)
+
+    plt.tight_layout()
+    plt.show()
 
 
 if __name__ == '__main__':
@@ -626,7 +698,8 @@ if __name__ == '__main__':
     # Пути к папкам с оригинальными и декодированными изображениями
     encoded_folder = 'data/encoded_frames/'
     decoded_folder = 'data/decoded_frames/'
+    q90_folder = 'data/frames_Q90/'
     save_decoded_frames(decoded_frames, decoded_folder)
-    sys.stderr.write(f"Начинаю вычислять PSNR между оригинальными и декодированными изображениями: \n")
+    sys.stderr.write(f"Начинаю вычислять PSNR, SSIM и процент деградации между оригинальными и декодированными изображениями: \n")
     # Вычисление PSNR и коэффициента деградации
-    average_psnr, psnr_list, average_degradation, degradation_list = process_sequence_psnr_and_degradation(encoded_folder, decoded_folder)
+    average_psnr, psnr_list, average_degradation, degradation_list, average_ssim, ssim_list = process_sequence_psnr_and_degradation(encoded_folder, decoded_folder, q90_folder)

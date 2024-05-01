@@ -59,7 +59,8 @@ def extract_frames(folder_path: str, height: int, width: int) -> list:
     frames = []
 
     # Цикл по номерам кадров
-    for i in range(21, 30):
+    for i in range(1, 12):
+    # for i in range(21, 30):
     # for i in range(65, 96):
         # Формируем имя файла RAW
         file_path = os.path.join(folder_path, f'frame_{i}.RAW')
@@ -601,9 +602,14 @@ def save_encoded_frames(encoded_frames, save_folder, gif_filename='input_animati
     """
     if not os.path.exists(save_folder):
         os.makedirs(save_folder)
+    jpeg_folder = 'data/frames_Q90'
+    if not os.path.exists(jpeg_folder):
+        os.makedirs(jpeg_folder)
 
     for i, frame in enumerate(encoded_frames):
         print_progress_bar(i + 1, len(encoded_frames), prefix='Сохраняю кадры:', suffix='Готово', length=50)
+        jpeg_filename = os.path.join(jpeg_folder, f"frame_{i:03d}.jpg")
+        imageio.imwrite(jpeg_filename, frame[:, :, ::-1], format='JPEG', quality=90)
         filename = os.path.join(save_folder, f"frame_{i:03d}.png")
         cv2.imwrite(filename, frame)
 
@@ -648,7 +654,8 @@ if __name__ == '__main__':
 
     folder_path = 'data/frames/'
     # height, width = 240, 320
-    height, width = 1920, 1080
+    # height, width = 1920, 1080
+    height, width = 1920, 3840
     frames = extract_frames(folder_path, height, width)
     frames_yuv = convert_frames_to_yuv(frames)
 

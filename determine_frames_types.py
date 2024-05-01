@@ -177,8 +177,8 @@ def get_frame_types(frames: list) -> list:
     #         else:
     #             frame_types.append(frame_type)
 
-    last_frame_type = determine_last_frame_type(frames[-2], frames[-1], adaptive_threshold_sad, adaptive_threshold_flow)
-    frame_types.append(last_frame_type)
+    # last_frame_type = determine_last_frame_type(frames[-2], frames[-1], adaptive_threshold_sad, adaptive_threshold_flow)
+    # frame_types.append(last_frame_type)
     return frame_types
 
 
