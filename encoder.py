@@ -6,11 +6,13 @@ import imageio.v2 as imageio
 import numpy as np
 import cv2
 import os
-from determine_frames_types import get_frame_types, calculate_optical_flow_farneback
+from determine_frames_types import get_frame_types, calculate_optical_flow_farneback, \
+    calculate_optical_flow_lucas_canade
 from huffman import huffman_encoding
 import json
 import math
-from utils import quant_matrix_Y, quant_matrix_UV, print_progress_bar
+from utils import quant_matrix_Y, quant_matrix_UV, print_progress_bar, get_motion_vec
+
 
 def dct(block: np.ndarray) -> np.ndarray:
     """
@@ -59,8 +61,8 @@ def extract_frames(folder_path: str, height: int, width: int) -> list:
     frames = []
 
     # Цикл по номерам кадров
-    for i in range(1, 12):
-    # for i in range(21, 30):
+    # for i in range(1, 12):
+    for i in range(21, 30):
     # for i in range(65, 96):
         # Формируем имя файла RAW
         file_path = os.path.join(folder_path, f'frame_{i}.RAW')
@@ -157,19 +159,30 @@ def pad_block_to_8x8(block: np.ndarray) -> np.ndarray:
     padded_block[:block.shape[0], :block.shape[1]] = block
     return padded_block
 
-def dct_quantize_block(block: np.ndarray, quant_matrix: np.ndarray) -> np.ndarray:
+def dct_quantize_block(block: np.ndarray, quant_matrix: np.ndarray, use_scale_factor=False) -> np.ndarray:
     """
-    Применяет DCT к блоку, а затем квантует результат с использованием заданной матрицы квантования.
+    Применяет DCT к блоку, а затем квантует результат с использованием заданной матрицы квантования,
+    с предварительным масштабированием блока для улучшения точности квантования.
 
     :param block: Входящий блок
     :param quant_matrix: Матрица квантования
+    :param scale_factor: Фактор масштабирования для предварительной обработки блока
     """
+    if use_scale_factor:
+        # Масштабируем блок для увеличения значений
+        block = block * 1e10
+
     # Применяем DCT
     dct_block = cv2.dct(block.astype(np.float32))
-    # dct_block = dct(block.astype(np.float32))
+    # dct_block = dct(scaled_block.astype(np.float32))
 
     # Применяем квантование
     quantized_block = np.round(dct_block / quant_matrix)
+
+    # Масштабируем обратно
+    if use_scale_factor:
+        quantized_block /= 1e10
+
     return quantized_block
 
 def zigzag_scan(matrix: np.ndarray) -> list:
@@ -285,31 +298,25 @@ def encode_i_frame(frame: np.ndarray, quant_matrix: np.ndarray) -> np.ndarray:
 
     return encoded_blocks, huffman_table
 
+
 def predict_p_frame_from_flow(prev_frame: np.ndarray, flow: np.ndarray) -> np.ndarray:
     """
-    Предсказывает P-кадр, используя вектор движения.
+    Предсказывает P-кадр, используя оптический поток.
 
     :param prev_frame: Предыдущий кадр
-    :param flow: Вектор движения
+    :param flow: Оптический поток
     :return: Предсказанный кадр
     """
-
     h, w = flow.shape[:2]
-    flow_map = np.column_stack((np.repeat(np.arange(h), w), np.tile(np.arange(w), h)))
+    # Создаем сетку координат
+    x, y = np.meshgrid(np.arange(w), np.arange(h))
 
-    # Применение векторов движения к координатам пикселей
-    new_positions = flow_map + flow.reshape(-1, 2)
+    # Добавляем поток к этим координатам
+    new_x = (x + flow[..., 0]).astype(np.float32)
+    new_y = (y + flow[..., 1]).astype(np.float32)
 
-    # Ограничение координат, чтобы они оставались в пределах изображения
-    new_positions[:, 0] = np.clip(new_positions[:, 0], 0, h - 1)
-    new_positions[:, 1] = np.clip(new_positions[:, 1], 0, w - 1)
-
-    # Создание предсказанного P-кадра
-    predicted_frame = np.zeros_like(prev_frame)
-    for i in range(len(flow_map)):
-        src_y, src_x = flow_map[i].astype(int)
-        dst_y, dst_x = new_positions[i].astype(int)
-        predicted_frame[dst_y, dst_x] = prev_frame[src_y, src_x]
+    # Используем функцию remap для интерполяции новых позиций пикселей
+    predicted_frame = cv2.remap(prev_frame, new_x, new_y, cv2.INTER_LINEAR)
 
     return predicted_frame
 
@@ -337,6 +344,19 @@ def predict_b_frame(prev_frame: np.ndarray, next_frame: np.ndarray, flow_to_prev
 
     return predicted_frame
 
+def pad_to_multiple(image, multiple=16):
+    """ Добавляет заполнение к изображению, чтобы его размеры стали кратны заданному числу """
+    pad_height = (multiple - image.shape[0] % multiple) % multiple
+    pad_width = (multiple - image.shape[1] % multiple) % multiple
+    if image.ndim == 3:
+        # Для трехмерных данных (возможно, полноцветное изображение)
+        padded_image = np.pad(image, ((0, pad_height), (0, pad_width), (0, 0)), mode='constant')
+    else:
+        # Для двумерных данных (Y, U или V компоненты)
+        padded_image = np.pad(image, ((0, pad_height), (0, pad_width)), mode='constant')
+    return padded_image
+
+
 
 def encode_p_frame(prev_frame: np.ndarray, current_frame: np.ndarray, quant_matrix: np.ndarray) -> np.ndarray:
     """
@@ -350,7 +370,6 @@ def encode_p_frame(prev_frame: np.ndarray, current_frame: np.ndarray, quant_matr
     # Вычисление оптического потока и создание предсказанного P-кадра
     flow = calculate_optical_flow_farneback(prev_frame, current_frame)
     predicted_frame = predict_p_frame_from_flow(prev_frame, flow)
-
     # Вычисление разности между текущим кадром и предсказанным
     frame_diff = cv2.absdiff(current_frame, predicted_frame)
 
@@ -363,7 +382,7 @@ def encode_p_frame(prev_frame: np.ndarray, current_frame: np.ndarray, quant_matr
         for j in range(0, width, 8):
             block = frame_diff[i:i + 8, j:j + 8]
             padded_block = pad_block_to_8x8(block)
-            quantized_block = dct_quantize_block(padded_block, quant_matrix)
+            quantized_block = dct_quantize_block(padded_block, quant_matrix, use_scale_factor=True)
             zigzagged_block = zigzag_scan(quantized_block)
             rle_block = run_length_encode(zigzagged_block)
             all_rle_blocks.append(rle_block)
@@ -654,8 +673,8 @@ if __name__ == '__main__':
 
     folder_path = 'data/frames/'
     # height, width = 240, 320
-    # height, width = 1920, 1080
-    height, width = 1920, 3840
+    height, width = 1920, 1080
+    # height, width = 1920, 3840
     frames = extract_frames(folder_path, height, width)
     frames_yuv = convert_frames_to_yuv(frames)
 

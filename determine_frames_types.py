@@ -38,6 +38,40 @@ def calculate_optical_flow_farneback(prev_frame: np.ndarray, next_frame: np.ndar
         raise ValueError("Кадры должны быть в формате градаций серого (одноканальные).")
     return flow
 
+def calculate_optical_flow_lucas_canade(prev_frame: np.ndarray, next_frame: np.ndarray) -> np.ndarray:
+    """
+    Вычисляет оптический поток между двумя изображениями с использованием метода Лукаса-Канаде.
+
+    Параметры:
+    - prev_frame: первое изображение в градациях серого.
+    - next_frame: второе изображение в градациях серого.
+
+    Возвращает:
+    - points: массив точек на первом изображении, где оптический поток был вычислен.
+    - flow: массив векторов оптического потока для соответствующих точек.
+    """
+    # Параметры для алгоритма Лукаса-Канаде
+    lk_params = dict(
+        winSize=(15, 15),
+        maxLevel=2,
+        criteria=(
+            cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+            10,
+            0.03
+        )
+    )
+    # Определение точек для отслеживания
+    p0 = cv2.goodFeaturesToTrack(prev_frame, mask=None, maxCorners=100, qualityLevel=0.3, minDistance=7, blockSize=7)
+    if p0 is not None:
+        # Вычисление оптического потока
+        p1, st, err = cv2.calcOpticalFlowPyrLK(prev_frame, next_frame, p0, None, **lk_params)
+        # Выбор хороших точек
+        good_new = p1[st == 1]
+        good_old = p0[st == 1]
+        return good_old, good_new
+    else:
+        return None, None
+
 
 def calculate_adaptive_thresholds(frames: list) -> tuple:
     """
@@ -176,9 +210,10 @@ def get_frame_types(frames: list) -> list:
     #             frame_types.append('P')
     #         else:
     #             frame_types.append(frame_type)
-
+    #
     # last_frame_type = determine_last_frame_type(frames[-2], frames[-1], adaptive_threshold_sad, adaptive_threshold_flow)
     # frame_types.append(last_frame_type)
+
     return frame_types
 
 

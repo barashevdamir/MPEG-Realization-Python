@@ -4,7 +4,7 @@ import math
 import pickle
 import sys
 from typing import Tuple, List
-
+from tabulate import tabulate
 import imageio.v2 as imageio
 import cv2
 from huffman import huffman_decoding
@@ -14,6 +14,7 @@ from utils import print_progress_bar
 from skimage import io
 import matplotlib.pyplot as plt
 from skimage.metrics import structural_similarity as ssim
+from utils import zigzag_order, zigzag_index
 
 
 def median_filter(input_frame: np.ndarray, kernel_size: int) -> np.ndarray:
@@ -107,7 +108,7 @@ def zigzag_scan_inverse(arr: list) -> np.ndarray:
     size = 8
     if len(arr) != size**2:
         raise ValueError("Длина массива не соответствует ожидаемой для матрицы 8x8.")
-    matrix = np.zeros((size, size), dtype=int)
+    matrix = np.zeros((size, size), dtype=float)
     index = 0
     for d in range(2 * size - 1):
         for i in range(max(0, d - size + 1), min(size, d + 1)):
@@ -224,6 +225,36 @@ def process_and_decompress_frame(
     frame = reconstruct_frame_from_blocks(blocks, frame_shape)
     return frame
 
+def process_and_decompress_p_frame(
+        encoded_blocks: list,
+        quant_matrix: np.ndarray,
+        huffman_table: dict,
+        frame_shape: tuple
+) -> np.ndarray:
+    """
+    Обрабатывает и декомпрессирует кадр.
+
+    :param encoded_blocks: Список закодированных блоков.
+    :param quant_matrix: Матрица квантования.
+    :param huffman_table: Таблица Хаффмана.
+    :param frame_shape: Размеры исходного кадра Y (высота, ширина).
+    :return: Декомпрессированный кадр.
+    """
+    blocks = []
+    for encoded_block in encoded_blocks:
+        # Декодирование Хаффмана
+        decoded_data = huffman_decoding(encoded_block, huffman_table)
+        # Декодирование длин серий
+        rle_decoded = run_length_decode(decoded_data)
+        # Обратное Zigzag-сканирование
+        zigzagged_block = zigzag_scan_inverse(rle_decoded)
+        # Обратное квантование и DCT
+        block = dct_quantize_block_inverse(zigzagged_block, quant_matrix)
+        blocks.append(block)
+    # Восстановление кадра из блоков
+    frame = reconstruct_frame_from_blocks(blocks, frame_shape)
+    return frame
+
 def apply_upsampling(
         u_frame: np.ndarray,
         v_frame: np.ndarray,
@@ -237,16 +268,9 @@ def apply_upsampling(
     :param frame_shape: Размеры исходного кадра Y (высота, ширина).
     :return: Восстановленные кадры U и V каналов.
     """
-    # Расчет новых размеров для U и V компонентов
-    new_height, new_width = frame_shape
-
-    # Увеличение размера U компонента
-    upsampled_u = cv2.resize(u_frame, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
-
-    # Увеличение размера V компонента
-    upsampled_v = cv2.resize(v_frame, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
-
-    return upsampled_u, upsampled_v
+    u_upsampled = cv2.resize(u_frame, (frame_shape[1], frame_shape[0]), interpolation=cv2.INTER_CUBIC)
+    v_upsampled = cv2.resize(v_frame, (frame_shape[1], frame_shape[0]), interpolation=cv2.INTER_CUBIC)
+    return u_upsampled, v_upsampled
 
 
 def decode_sequence(
@@ -290,106 +314,47 @@ def decode_sequence(
         else:
             # P или B кадр: добавляем разность к предыдущему кадру
             if prev_decoded_yuv is not None:
-                y = prev_decoded_yuv[..., 0] + diff_y
-                u = prev_decoded_yuv[..., 1] + diff_u
-                v = prev_decoded_yuv[..., 2] + diff_v
+                y = cv2.add(prev_decoded_yuv[..., 0], diff_y)
+                u = cv2.add(prev_decoded_yuv[..., 1], diff_u)
+                v = cv2.add(prev_decoded_yuv[..., 2], diff_v)
             else:
                 # Если предыдущий кадр отсутствует, используем нулевой кадр
                 y, u, v = diff_y, diff_u, diff_v
 
 
-
-        # Объединение каналов Y, U, V в YUV кадр и его преобразование в BGR для отображения
         yuv_frame = cv2.merge([y.astype(np.uint8), u.astype(np.uint8), v.astype(np.uint8)])
-        # frame = cv2.cvtColor(yuv_frame, cv2.COLOR_YUV2BGR)
         decoded_frames.append(yuv_frame)
-
-        # Обновление ссылки на последний декодированный YUV-кадр
         prev_decoded_yuv = yuv_frame
 
     return decoded_frames
 
-# def decode_sequence(encoded_frames, huffman_tables_list, frame_types, quant_matrix_Y, quant_matrix_UV, frame_shape):
-#     decoded_frames = [None] * len(frame_types)  # Массив для хранения декодированных кадров
-#     to_decode = set(range(len(frame_types)))  # Индексы кадров, которые еще предстоит декодировать
-#
-#     # Первичное декодирование I-кадров
-#     for index, frame_type in enumerate(frame_types):
-#         if frame_type == 'I':
-#             y = process_and_decompress_frame(encoded_frames[index][0], quant_matrix_Y, huffman_tables_list[index][0], frame_shape)
-#             u = process_and_decompress_frame(encoded_frames[index][1], quant_matrix_UV, huffman_tables_list[index][1], (frame_shape[0]//2, frame_shape[1]//2))
-#             v = process_and_decompress_frame(encoded_frames[index][2], quant_matrix_UV, huffman_tables_list[index][2], (frame_shape[0]//2, frame_shape[1]//2))
-#             u, v = apply_upsampling(u, v, frame_shape)
-#             decoded_frames[index] = cv2.merge([y.astype(np.uint8), u.astype(np.uint8), v.astype(np.uint8)])
-#             to_decode.remove(index)  # Отмечаем кадр как декодированный
-#
-#     # Итеративное декодирование P и B кадров
-#     something_decoded = True
-#     while something_decoded:
-#         something_decoded = False
-#         for index, frame_type in enumerate(frame_types):
-#             if index in to_decode and (frame_type == 'P' or frame_type == 'B'):
-#                 prev_index = index - 1
-#                 next_index = index + 1 if index + 1 < len(frame_types) else None
-#
-#                 can_decode = True
-#                 if frame_type == 'P' and prev_index >= 0 and decoded_frames[prev_index] is None:
-#                     can_decode = False
-#                 if frame_type == 'B' and (prev_index < 0 or decoded_frames[prev_index] is None or next_index is None or decoded_frames[next_index] is None):
-#                     can_decode = False
-#
-#                 if can_decode:
-#                     y = process_and_decompress_frame(encoded_frames[index][0], quant_matrix_Y, huffman_tables_list[index][0], frame_shape)
-#                     u = process_and_decompress_frame(encoded_frames[index][1], quant_matrix_UV, huffman_tables_list[index][1], (frame_shape[0]//2, frame_shape[1]//2))
-#                     v = process_and_decompress_frame(encoded_frames[index][2], quant_matrix_UV, huffman_tables_list[index][2], (frame_shape[0]//2, frame_shape[1]//2))
-#                     u, v = apply_upsampling(u, v, frame_shape)
-#                     if frame_type == 'P':
-#                         y += decoded_frames[prev_index][..., 0]
-#                         u += decoded_frames[prev_index][..., 1]
-#                         v += decoded_frames[prev_index][..., 2]
-#                     elif frame_type == 'B':
-#                         y = (y + decoded_frames[prev_index][..., 0] + decoded_frames[next_index][..., 0]) // 2
-#                         u = (u + decoded_frames[prev_index][..., 1] + decoded_frames[next_index][..., 1]) // 2
-#                         v = (v + decoded_frames[prev_index][..., 2] + decoded_frames[next_index][..., 2]) // 2
-#                     decoded_frames[index] = cv2.merge([y.astype(np.uint8), u.astype(np.uint8), v.astype(np.uint8)])
-#                     to_decode.remove(index)
-#                     something_decoded = True
-#
-#     # Проверка, все ли кадры декодированы
-#     if any(to_decode):
-#         raise Exception(f"Deadlock in frame decoding: cannot progress with available frames: {to_decode}")
-#
-#     return decoded_frames
-#
 
-
-
-def predict_p_frame(
-        prev_decoded_frame: np.ndarray,
-        current_encoded_frame: np.ndarray,
-        motion_vectors: np.ndarray,
-        quant_matrix: np.ndarray,
-        huffman_table: dict
-) -> np.ndarray:
+def predict_p_frame(prev_frame: np.ndarray, motion_vectors: np.ndarray) -> np.ndarray:
     """
-    Вычисляет P-кадр, используя предыдущий декодированный кадр и векторы движения.
-    Применяет векторы движения для восстановления текущего кадра из предыдущего.
+    Восстанавливает P-кадр, используя оптический поток и предыдущий кадр.
+
+    :param prev_frame: Предыдущий кадр в виде массива numpy.
+    :param motion_vectors: Оптический поток в виде массива numpy.
+    :return: Восстановленный P-кадр в виде массива numpy.
     """
-    predicted_frame = np.zeros_like(prev_decoded_frame)
+    height, width = prev_frame.shape[:2]
+    reconstructed_frame = np.zeros_like(prev_frame)
 
-    # Декодируем текущий кадр для получения разности (если это необходимо)
-    current_frame_diff = process_and_decompress_frame(current_encoded_frame, quant_matrix, huffman_table, prev_decoded_frame.shape)
+    # Проверяем, представляют ли motion_vectors смещения по обеим осям
+    if motion_vectors.ndim == 3 and motion_vectors.shape[2] == 2:
+        dx, dy = motion_vectors[:, :, 0], motion_vectors[:, :, 1]
+    elif motion_vectors.ndim == 2:
+        dx, dy = motion_vectors, np.zeros_like(motion_vectors)  # Предполагаем только горизонтальное смещение
+    else:
+        raise ValueError("Неправильная размерность массива motion_vectors")
 
-    # Применяем векторы движения для каждого блока
-    height, width = prev_decoded_frame.shape[:2]
-    for i in range(0, height, 8):
-        for j in range(0, width, 8):
-            block_y, block_x = i // 8, j // 8
-            dy, dx = motion_vectors[block_y * (width // 8) + block_x]
-            src_y, src_x = max(min(i + dy, height - 8), 0), max(min(j + dx, width - 8), 0)
-            predicted_frame[i:i+8, j:j+8] = prev_decoded_frame[src_y:src_y+8, src_x:src_x+8] + current_frame_diff[i:i+8, j:j+8]
+    x, y = np.meshgrid(np.arange(width), np.arange(height))
+    new_x = np.clip(x + dx, 0, width - 1).astype(int)
+    new_y = np.clip(y + dy, 0, height - 1).astype(int)
 
-    return predicted_frame
+    reconstructed_frame[new_y, new_x] = prev_frame[y, x]
+
+    return reconstructed_frame
 
 
 def predict_b_frame(
@@ -615,6 +580,8 @@ def process_sequence_psnr_and_degradation(original_folder: str, encoded_folder: 
     ssim_list = []
     degradation_list = []
 
+    table_data = []
+
     for orig_file, enc_file, q90_file in zip(original_files, encoded_files, q90_files):
         orig_path = os.path.join(original_folder, orig_file)
         enc_path = os.path.join(encoded_folder, enc_file)
@@ -635,19 +602,19 @@ def process_sequence_psnr_and_degradation(original_folder: str, encoded_folder: 
         ssim, degradation = calculate_quality_degradation(orig_path, enc_path, q90_path)
         ssim_list.append(ssim)
         degradation_list.append(degradation)
-
-        sys.stderr.write(f"PSNR для {orig_file} и {enc_file}: {psnr:.2f} \n")
-        sys.stderr.write(f"SSIM для {orig_file} и {enc_file}: {ssim:.2f} \n")
-        sys.stderr.write(f"Процент деградации для {orig_file} и {enc_file}: {degradation:.2f}% \n")
+        table_data.append([orig_file, enc_file, f"{psnr:.2f}", f"{ssim:.2f}", f"{degradation:.2f}%"])
 
     # Средние значения PSNR и процентной деградации
     if psnr_list and degradation_list and ssim_list:
         average_psnr = sum(psnr_list) / len(psnr_list)
         average_degradation = sum(degradation_list) / len(degradation_list)
         average_ssim = sum(ssim_list) / len(ssim_list)
-        sys.stderr.write(f"Среднее значение PSNR для всей последовательности: {average_psnr} \n")
-        sys.stderr.write(f"Средний процент деградации для всей последовательности: {average_degradation:.2f}% \n")
-        sys.stderr.write(f"Средний SSIM для всей последовательности: {average_ssim:.2f} \n")
+        table_data.append(["Среднее", "", f"{average_psnr:.2f}", f"{average_ssim:.2f}", f"{average_degradation:.2f}%"])
+
+        headers = ["Оригинальное изображение", "Декодированное изображение", "PSNR", "SSIM", "Коэффициент деградации"]
+        table = tabulate(table_data, headers=headers, tablefmt="grid")
+        sys.stderr.write(table)
+
         return average_psnr, psnr_list, average_degradation, degradation_list, average_ssim, ssim_list
     else:
         sys.stderr.write("Нет валидных изображений в директориях. \n")
@@ -656,7 +623,7 @@ def process_sequence_psnr_and_degradation(original_folder: str, encoded_folder: 
     plot_metrics(psnr_list, ssim_list, degradation_list, file_names)
 
 
-def plot_metrics(psnr_list, ssim_list, degradation_list, file_names):
+def plot_metrics(psnr_list: List[float], ssim_list: List[float], degradation_list: List[float], file_names: List[str]) -> None:
     """
     Построение графиков для PSNR, SSIM и процента деградации.
 
