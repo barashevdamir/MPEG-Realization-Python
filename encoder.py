@@ -1,52 +1,36 @@
 import gzip
+import os
 import pickle
 import sys
-
-import imageio.v2 as imageio
-import numpy as np
+import time
 import cv2
-import os
-from determine_frames_types import get_frame_types, calculate_optical_flow_farneback, \
-    calculate_optical_flow_lucas_canade
-from huffman import huffman_encoding
-import json
-import math
-from utils import quant_matrix_Y, quant_matrix_UV, print_progress_bar, get_motion_vec
+import numpy as np
+from huffman import huffman_decode, huffman_encode, build_huffman_tree
+from determine_frames_types import get_frame_types
+from utils import print_progress_bar, save_encoded_frames, compare_folder_and_file_size, save_decoded_frames, \
+    sec2timestr, rgb2yuv, quant_matrix_I, quant_matrix_PB
+from length_coding import run_length_encode, run_length_decode
 
 
-def dct(block: np.ndarray) -> np.ndarray:
+def get_frames(folder_path, height, width, frames_quantity):
     """
-    Вычисляет двумерное дискретное косинусное преобразование (DCT) для данного блока.
-    DCT преобразует блок из пространственной области в частотную.
+    Загружает видео из файла.
 
-    param block: Входящий блок
-    return: Выходной блок
+    Аргументы:
+    filename -- имя файла видео.
+    frames_quantity -- количество кадров для загрузки, если frames_quantity == 0, загружаются все кадры.
 
+    Возвращает:
+    frames -- данные видео в формате numpy массива.
     """
 
-    N, M = block.shape
-    dct_block = np.zeros((N, M))
+    frames = extract_frames(folder_path, height, width)
+    save_encoded_frames(frames, "data/encoded_frames/")
 
-    for u in range(N):
-        for v in range(M):
-            sum = 0
-            for i in range(N):
-                for j in range(M):
-                    sum += block[i, j] * math.cos((math.pi * u * (2 * i + 1)) / (2 * N)) * math.cos(
-                        (math.pi * v * (2 * j + 1)) / (2 * M))
-            # Нормализация коэффициентов
-            if u == 0:
-                cu = 1 / math.sqrt(N)
-            else:
-                cu = math.sqrt(2) / math.sqrt(N)
-            if v == 0:
-                cv = 1 / math.sqrt(M)
-            else:
-                cv = math.sqrt(2) / math.sqrt(M)
-            dct_block[u, v] = cu * cv * sum
+    # Преобразуем список кадров в 4D numpy массив
+    frames = np.stack(frames, axis=3)
 
-    return dct_block
-
+    return frames
 
 def extract_frames(folder_path: str, height: int, width: int) -> list:
     """
@@ -66,7 +50,6 @@ def extract_frames(folder_path: str, height: int, width: int) -> list:
     # for i in range(65, 96):
         # Формируем имя файла RAW
         file_path = os.path.join(folder_path, f'frame_{i}.RAW')
-        file_size = os.path.getsize(file_path)
 
         # Читаем RAW файл
         try:
@@ -83,626 +66,353 @@ def extract_frames(folder_path: str, height: int, width: int) -> list:
 
     return frames
 
-def convert_frames_to_yuv(frames: list) -> list:
+def encode_frames(frames):
     """
-    Конвертирует кадры в формат YUV.
+    Кодирует видеоролик, используя заданный шаблон типов кадров.
 
-    :param frames: Список кадров в формате RGB
-    :return: Список кадров в формате YUV
+    Аргументы:
+    frames -- входной видеоролик в формате RGB.
+
+    Возвращает:
+    mpeg -- список с закодированными данными каждого кадра.
     """
-    transform_matrix = np.array([
-        [0.229, 0.587, 0.144],
-        [0.5, -0.4187, -0.0813],
-        [0.1687, -0.3313, 0.5]
-    ])
-    offset = np.array([0, 128, 128])
-    yuv_frames = []
-    for frame in frames:
+    frame_y = []
+    # Перебор кадров
+    frames_quantity = frames.shape[3]
+    for i in range(frames_quantity):
+        # Получаем кадр
+        frame = frames[:, :, :, i].astype(np.float32)
+        frame = rgb2yuv(frame)
+        frame_y.append(frame[:, :, 0])
 
-        yuv_frame = np.dot(frame.reshape(-1, 3), transform_matrix.T) + offset
-        yuv_frame = np.clip(yuv_frame, 0, 255)
-        yuv_frame = yuv_frame.reshape(frame.shape).astype(np.uint8)
-        yuv_frames.append(yuv_frame)
+    frame_types_list, frame_types = get_frame_types(frame_y)
+    sys.stderr.write(f'Типы кадров: {frame_types_list} \n')
 
-    return yuv_frames
+    mpeg = []
+    prev_frame = None
 
+    for i in range(frames_quantity):
+        # Получаем кадр
+        frame = frames[:, :, :, i].astype(np.float32)
 
-def apply_subsampling(frames: list) -> list:
+        # Конвертация кадра в YCbCr
+        frame = rgb2yuv(frame)
+
+        # Получаем тип кадра из шаблона
+        frame_type = frame_types[i % len(frame_types)]
+
+        # Кодирование кадра
+        encoded_frame, prev_frame = encframe(frame, frame_type, prev_frame)
+
+        # Сохраняем результат
+        mpeg.append(encoded_frame)
+
+        print_progress_bar((i+1) * 100 / frames_quantity, 100, prefix='Происходит кодирование кадров:', suffix='Готово', length=50)
+
+    return mpeg
+
+def encframe(frame, frame_type, prev_frame):
     """
-    Применяет субдискретизацию 4:2:0 ко всем кадрам в списке.
+    Кодирует кадр, разбивая его на макроблоки и кодируя каждый макроблок.
 
-    :param frames: Список кадров в формате YUV
-    :return: Список кадров после субдискретизации с уменьшенными U и V каналами
+    Аргументы:
+    frame -- текущий кадр для кодирования.
+    frame_type -- тип кадра ('I' или 'P').
+    prev_frame -- предыдущий кадр.
+
+    Возвращает:
+    mpeg -- массив со структурами данных для каждого макроблока.
+    encoded_frame -- декодированный кадр после кодирования всех макроблоков.
     """
-    subsampled_frames = []
+    M, N, _ = frame.shape
+    block_size = (M // 16, N // 16)
+    mpeg = np.empty(block_size, dtype=object)
+    encoded_frame = np.zeros_like(frame)
 
-    for yuv_frame in frames:
-        # Разделяем каналы
-        y, u, v = cv2.split(yuv_frame)
+    # Яркостная компонента предыдущего кадра
+    if prev_frame is not None:
+        prev_frame_y = prev_frame[:, :, 0]
+    else:
+        prev_frame_y = np.zeros_like(frame[:, :, 0])
 
-        # Применяем субдискретизацию к каналам U и V
-        u_subsampled = u[::2, ::2]
-        v_subsampled = v[::2, ::2]
 
-        # Сохраняем каналы как отдельные элементы списка
-        subsampled_frames.append((y, u_subsampled, v_subsampled))
+    # Перебор макроблоков
+    for m in range(block_size[0]):
+        for n in range(block_size[1]):
+            # Вычисляем координаты текущего макроблока
+            x = 16 * m
+            y = 16 * n
+            x_range = slice(x, x + 16)
+            y_range = slice(y, y + 16)
 
-    return subsampled_frames
+            # Кодируем макроблок
+            mpeg[m, n], encoded_frame[x_range, y_range, :] = encmacroblock(
+                frame[x_range, y_range, :], frame_type, prev_frame, prev_frame_y, x, y)
 
-def apply_no_subsampling(frames: list) -> list:
+    return mpeg, encoded_frame
+
+def encmacroblock(block, frame_type, prev_frame, prev_frame_y, x, y):
     """
-    Применяет субдискретизацию 4:2:0 ко всем кадрам в списке.
+    Кодирование макроблока.
 
-    :param frames: Список кадров в формате YUV
-    :return: Список кадров после субдискретизации с уменьшенными U и V каналами
+    Аргументы:
+    block -- текущий макроблок.
+    frame_type -- тип кадра ('I' или 'P').
+    prev_frame -- предыдущий кадр.
+    prev_frame_y -- яркостная компонента предыдущего кадра.
+    x, y -- координаты начала макроблока.
+
+    Возвращает:
+    mpeg -- структура данных с информацией о макроблоке.
+    decoded_block -- декодированный макроблок.
     """
-    subsampled_frames = []
+    # Квантовые матрицы
+    q1, q2 = quant_matrix_I(), quant_matrix_PB()[1]  # используем вторую матрицу из qinter
 
-    for yuv_frame in frames:
-        # Разделяем каналы
-        y, u, v = cv2.split(yuv_frame)
-        # Сохраняем каналы как отдельные элементы списка
-        subsampled_frames.append((y, u, v))
+    # Масштабирование качества
+    scale = 31
 
-    return subsampled_frames
+    # Инициализация структуры MPEG
+    mpeg = {
+        'type': 'I',
+        'mvx': 0,
+        'mvy': 0,
+        'scale': [scale] * 6,
+        'coef': np.zeros((8, 8, 6)),
+        'huffman': [],
+        'huffman_tree': []
+    }
 
-def pad_block_to_8x8(block: np.ndarray) -> np.ndarray:
-    """
-    Дополняет блок до размера 8x8, используя нулевое заполнение.
+    # Нахождение векторов движения для P-кадров
+    if frame_type == 'P':
+        mpeg['type'] = 'P'
+        mpeg, error_block = getmotionvec(mpeg, block, prev_frame, prev_frame_y, x, y)
+        block = error_block  # используем блок ошибки для кодирования
+        q = q2
+    else:
+        q = q1
 
-    :param block: Блок для дополнения
-    :return: Блок дополненный до 8x8
-    """
-    if block.shape == (8, 8):
-        return block
-    padded_block = np.zeros((8, 8), dtype=block.dtype)
-    padded_block[:block.shape[0], :block.shape[1]] = block
-    return padded_block
+    # Получение блоков яркости и цветности
+    b = getblocks(block)
 
-def dct_quantize_block(block: np.ndarray, quant_matrix: np.ndarray, use_scale_factor=False) -> np.ndarray:
-    """
-    Применяет DCT к блоку, а затем квантует результат с использованием заданной матрицы квантования,
-    с предварительным масштабированием блока для улучшения точности квантования.
-
-    :param block: Входящий блок
-    :param quant_matrix: Матрица квантования
-    :param scale_factor: Фактор масштабирования для предварительной обработки блока
-    """
-    if use_scale_factor:
-        # Масштабируем блок для увеличения значений
-        block = block * 1e10
-
-    # Применяем DCT
-    dct_block = cv2.dct(block.astype(np.float32))
-    # dct_block = dct(scaled_block.astype(np.float32))
-
-    # Применяем квантование
-    quantized_block = np.round(dct_block / quant_matrix)
-
-    # Масштабируем обратно
-    if use_scale_factor:
-        quantized_block /= 1e10
-
-    return quantized_block
-
-def zigzag_scan(matrix: np.ndarray) -> list:
-    """
-    Преобразует матрицу в одномерный массив с помощью Zigzag-сканирования.
-
-    Zigzag-порядок обеспечивает, что коэффициенты,
-    которые вероятно будут иметь меньшие значения или нули (особенно после квантования),
-    группируются в конце массива, что улучшает эффективность последующего сжатия данных.
-
-    :param matrix: Входная матрица (обычно 8x8 после DCT и квантования)
-    :return: Одномерный массив элементов, полученных Zigzag-сканированием
-    """
-    if matrix.shape[0] != matrix.shape[1]:
-        raise ValueError("Матрица должна быть квадратной")
-
-    size = matrix.shape[0]
-    result = []
-
-    for d in range(2 * size - 1):
-        for i in range(d + 1):
-            j = d - i
-
-            if i >= size or j >= size:
-                continue  # Пропускаем индексы за пределами матрицы
-
-            if d % 2 == 0:
-                result.append(matrix[j, i] if d & 1 else matrix[i, j])
+    # Кодирование блоков
+    for i in range(6):
+        coef = cv2.dct(b[:, :, i])
+        # coef = dct(b[:, :, i])
+        mpeg['coef'][:, :, i] = np.round(8 * coef / (scale * q))
+        # Применяем RLE
+        rle_encoded = run_length_encode(mpeg['coef'][:, :, i])
+        # Подсчет частот для Хаффмана
+        freq = {}
+        for symbol, _ in rle_encoded:
+            if symbol in freq:
+                freq[symbol] += 1
             else:
-                result.append(matrix[i, j] if d & 1 else matrix[j, i])
+                freq[symbol] = 1
+        # Строим дерево Хаффмана и кодируем
+        huffman_tree = build_huffman_tree(freq)
+        encoded_data = huffman_encode(rle_encoded, huffman_tree)
 
-    return result
+        mpeg['huffman'].append(encoded_data)
+        mpeg['huffman_tree'].append(huffman_tree)
 
-def run_length_encode(arr: list) -> list:
+    # Декодирование этого макроблока для использования в будущем P-кадре
+    decoded_block = decmacroblock(mpeg, prev_frame, x, y)
+
+    return mpeg, decoded_block
+
+def decmacroblock(mpeg, prev_frame, x, y):
     """
-    Применяет кодирование по длинам серий к 1D массиву.
+    Декодирование макроблока из MPEG потока.
 
-    :param arr: 1D массив
-    :return: Список элементов, полученных RLE-кодированием
+    Аргументы:
+    mpeg -- словарь или объект с данными MPEG (тип кадра, векторы движения, коэффициенты, масштабы).
+    prev_frame -- предыдущий кадр (для использования в предсказании).
+    x, y -- координаты начала макроблока в предыдущем кадре.
+
+    Возвращает:
+    block -- декодированный макроблок.
     """
-    if not arr:
-        return []
+    # Инициализация матриц квантования
+    q1, q2 = quant_matrix_I(), quant_matrix_PB()[1]  # Предположим, что qinter возвращает матрицу
+
+    block = np.zeros((16, 16, 3))
+
+    # Предсказание с использованием векторов движения
+    if mpeg['type'] == 'P':
+        block = prev_frame[x + mpeg['mvx'] : x + mpeg['mvx'] + 16, y + mpeg['mvy'] : y + mpeg['mvy'] + 16, :]
+        q = q2
     else:
-        result = [(arr[0], 1)]  # Значение, счетчик
-        for element in arr[1:]:
-            if element == result[-1][0]:
-                result[-1] = (result[-1][0], result[-1][1] + 1)
-            else:
-                result.append((element, 1))
-        return result
+        q = q1
+
+    # Декодирование блоков
+    b = np.zeros((8, 8, 6))
+    for i in range(6):
+        # Декодируем Хаффман для получения RLE кодов
+        decoded_rle = huffman_decode(mpeg['huffman'][i], mpeg['huffman_tree'][i])
+        if not isinstance(decoded_rle, list) or not all(isinstance(x, tuple) for x in decoded_rle):
+            raise ValueError("decoded_rle должен быть списком кортежей")
+        # Применяем обратное RLE
+        decoded_values = run_length_decode(decoded_rle)
+        # Преобразуем список обратно в матрицу 8x8
+        b[:, :, i] = np.array(decoded_values).reshape(8, 8)
+        # Применяем обратное DCT
+        coef = b[:, :, i] * (mpeg['scale'][i] * q) / 8
+        b[:, :, i] = cv2.idct(coef)
+        # b[:, :, i] = idct(coef)
 
 
-def process_and_compress_frame(frame: np.ndarray, quant_matrix: np.ndarray) -> np.ndarray:
+    # Конструкция макроблока
+    block += putblocks(b)  # предполагается, что putblocks правильно собирает блоки
+
+    return block
+
+def putblocks(b):
     """
-    Применяет DCT и квантование к каждому блоку 8x8 в кадре,
-    затем применяет Zigzag - сканирование и RLE для сжатия.
+    Собирает блоки DCT в один макроблок.
 
-    :param frame: Входящий кадр
-    :param quant_matrix: Матрица квантования
-    :return: Сжатый кадр
+    Аргументы:
+    b -- массив блоков DCT, где b[:,:,i] представляет i-й блок.
+
+    Возвращает:
+    block -- макроблок собранный из входных блоков.
     """
-    h, w = frame.shape
-    processed_frame = np.zeros_like(frame, dtype=np.float32)
-    for i in range(0, h, 8):
-        for j in range(0, w, 8):
-            block = frame[i:i+8, j:j+8]
-            if block.shape == (8, 8):
-                processed_block = dct_quantize_block(block, quant_matrix)
-                processed_frame[i:i+8, j:j+8] = processed_block
-    return processed_frame
+    # Создаем пустой макроблок
+    block = np.zeros((16, 16, 3))
 
-def encode_i_frame(frame: np.ndarray, quant_matrix: np.ndarray) -> np.ndarray:
+    # Четыре блока яркости
+    block[0:8, 0:8, 0] = b[:,:,0]   # Верхний левый
+    block[0:8, 8:16, 0] = b[:,:,1]  # Верхний правый
+    block[8:16, 0:8, 0] = b[:,:,2]  # Нижний левый
+    block[8:16, 8:16, 0] = b[:,:,3] # Нижний правый
+
+    # Два подвыборочных блока цветности
+    z = np.array([[1, 1], [1, 1]])
+    block[:,:,1] = np.kron(b[:,:,4], z)  # Кронекер для Cb
+    block[:,:,2] = np.kron(b[:,:,5], z)  # Кронекер для Cr
+
+    return block
+
+
+def getblocks(block):
     """
-    Кодирует I-кадр в виде последовательности RLE блоков.
-    Кодирование производится с использованием таблицы Хаффмана.
+    Извлекает блоки из макроблока.
 
-    :param frame: Входящий кадр
-    :param quant_matrix: Матрица квантования
-    :return: Cжатый кадр
+    Аргументы:
+    block -- входной макроблок.
+
+    Возвращает:
+    b -- массив блоков 8x8 для дальнейшей обработки.
     """
-    height, width = frame.shape[:2]
-    all_rle_blocks = []  # Список для хранения RLE закодированных блоков
-    all_data_for_huffman = []  # Список для сбора данных всех блоков для Хаффмана
-    encoded_blocks = []
-    huffman_table = {}
+    b = np.zeros((8, 8, 6))
+
+    # Четыре блока яркости
+    b[:, :, 0] = block[0:8, 0:8, 0]
+    b[:, :, 1] = block[0:8, 8:16, 0]
+    b[:, :, 2] = block[8:16, 0:8, 0]
+    b[:, :, 3] = block[8:16, 8:16, 0]
+
+    # Два подвыборочных блока цветности
+    b[:, :, 4] = 0.25 * (block[0:16:2, 0:16:2, 1] + block[0:16:2, 1:16:2, 1] +
+                         block[1:16:2, 0:16:2, 1] + block[1:16:2, 1:16:2, 1])
+    b[:, :, 5] = 0.25 * (block[0:16:2, 0:16:2, 2] + block[0:16:2, 1:16:2, 2] +
+                         block[1:16:2, 0:16:2, 2] + block[1:16:2, 1:16:2, 2])
+
+    return b
 
 
-    # Обработка и сбор данных из каждого блока
-    for i in range(0, height, 8):
-        for j in range(0, width, 8):
-            block = frame[i:i + 8, j:j + 8]
-            padded_block = pad_block_to_8x8(block)
-            quantized_block = dct_quantize_block(padded_block, quant_matrix)
-            zigzagged_block = zigzag_scan(quantized_block)
-            rle_block = run_length_encode(zigzagged_block)
-            all_rle_blocks.append(rle_block)
-            all_data_for_huffman.extend(rle_block)
-
-    # Создание общей таблицы Хаффмана для всех блоков кадра
-    huffman_table = huffman_encoding(all_data_for_huffman)
-    # Кодирование блоков с использованием общей таблицы Хаффмана
-    encoded_blocks = []
-    for rle_block in all_rle_blocks:
-        encoded_block = ''
-        for value, count in rle_block:
-            key = (value, count)
-            code = huffman_table.get(key, 'ERROR')  # Безопасно извлекаем код
-            if code == 'ERROR':
-                print("ERROR")
-            encoded_block += code
-        encoded_blocks.append(encoded_block)
-
-
-    return encoded_blocks, huffman_table
-
-
-def predict_p_frame_from_flow(prev_frame: np.ndarray, flow: np.ndarray) -> np.ndarray:
+def getmotionvec(mpeg, block, prev_frame, prev_frame_y, x, y):
     """
-    Предсказывает P-кадр, используя оптический поток.
+    Получение векторов движения для макроблока.
 
-    :param prev_frame: Предыдущий кадр
-    :param flow: Оптический поток
-    :return: Предсказанный кадр
+    Аргументы:
+    mpeg -- словарь для хранения векторов движения.
+    block -- текущий макроблок.
+    prev_frame -- предыдущий кадр.
+    prev_frame_y -- яркостная компонента предыдущего кадра.
+    x, y -- координаты начала текущего макроблока.
+
+    Возвращает:
+    mpeg -- обновленный словарь с векторами движения.
+    error_block -- блок ошибок.
     """
-    h, w = flow.shape[:2]
-    # Создаем сетку координат
-    x, y = np.meshgrid(np.arange(w), np.arange(h))
+    # Работаем только с яркостной компонентой
+    mby = block[:, :, 0]
+    M, N = prev_frame_y.shape
 
-    # Добавляем поток к этим координатам
-    new_x = (x + flow[..., 0]).astype(np.float32)
-    new_y = (y + flow[..., 1]).astype(np.float32)
+    # Логарифмический поиск
+    step = 8
+    dx = [0, 1, 1, 0, -1, -1, -1, 0, 1]
+    dy = [0, 0, 1, 1, 1, 0, -1, -1, -1]
 
-    # Используем функцию remap для интерполяции новых позиций пикселей
-    predicted_frame = cv2.remap(prev_frame, new_x, new_y, cv2.INTER_LINEAR)
+    mvx, mvy = 0, 0
+    while step >= 1:
+        minsad = float('inf')
+        best_i = -1
 
-    return predicted_frame
+        for i in range(len(dx)):
+            tx = slice(x + mvx + dx[i] * step, x + mvx + dx[i] * step + 16)
+            ty = slice(y + mvy + dy[i] * step, y + mvy + dy[i] * step + 16)
+
+            if tx.start < 0 or tx.stop > M or ty.start < 0 or ty.stop > N:
+                continue
+
+            sad = np.sum(np.abs(mby - prev_frame_y[tx, ty]))
+
+            if sad < minsad:
+                minsad = sad
+                best_i = i
+
+        if best_i == -1:
+            break
+
+        mvx += dx[best_i] * step
+        mvy += dy[best_i] * step
+
+        step //= 2
+
+    mpeg['mvx'], mpeg['mvy'] = mvx, mvy
+
+    # Вычисляем блок ошибок
+    error_block = block - prev_frame[slice(x + mvx, x + mvx + 16), slice(y + mvy, y + mvy + 16), :]
+
+    return mpeg, error_block
 
 
-def predict_b_frame(prev_frame: np.ndarray, next_frame: np.ndarray, flow_to_prev: np.ndarray, flow_to_next: np.ndarray) -> np.ndarray:
-    """
-    Создаёт предсказание для B-кадра на основе векторов движения к предыдущему и последующему кадрам.
+if __name__ == '__main__':
 
-    :param prev_frame: Предыдущий кадр
-    :param next_frame: Последующий кадр
-    :param flow_to_prev: Вектор движения к предыдущему кадру
-    :param flow_to_next: Вектор движения к последующему кадру
-    :return: Предсказанный кадр
-    """
-    h, w = prev_frame.shape[:2]
+    sys.stderr.write("\nРеализация кодирования MPEG2 by DB\n")
 
-    # Предсказание на основе предыдущего кадра
-    predicted_from_prev = predict_p_frame_from_flow(prev_frame, flow_to_prev)
-
-    # Предсказание на основе последующего кадра
-    predicted_from_next = predict_p_frame_from_flow(next_frame, -flow_to_next)
-
-    # Комбинирование предсказаний
-    predicted_frame = (predicted_from_prev + predicted_from_next) / 2
-
-    return predicted_frame
-
-def pad_to_multiple(image, multiple=16):
-    """ Добавляет заполнение к изображению, чтобы его размеры стали кратны заданному числу """
-    pad_height = (multiple - image.shape[0] % multiple) % multiple
-    pad_width = (multiple - image.shape[1] % multiple) % multiple
-    if image.ndim == 3:
-        # Для трехмерных данных (возможно, полноцветное изображение)
-        padded_image = np.pad(image, ((0, pad_height), (0, pad_width), (0, 0)), mode='constant')
+    frames_quantity = 0
+    if frames_quantity == 0:
+        sys.stderr.write("\nКодируем все кадры \n")
     else:
-        # Для двумерных данных (Y, U или V компоненты)
-        padded_image = np.pad(image, ((0, pad_height), (0, pad_width)), mode='constant')
-    return padded_image
+        sys.stderr.write(f'\nКоличество кадров для загрузки: {frames_quantity} \n')
 
+    # Loading the video
+    folder_path = 'data/frames/'
+    height, width = 1920, 1080
+    frames = get_frames(folder_path, height, width, frames_quantity)
 
+    # Encoding
+    start_time = time.time()
+    mpeg = encode_frames(frames)
+    encode_time = time.time() - start_time
+    sys.stderr.write(f'\nОбщее время кодирования: {sec2timestr(encode_time)}\n')
 
-def encode_p_frame(prev_frame: np.ndarray, current_frame: np.ndarray, quant_matrix: np.ndarray) -> np.ndarray:
-    """
-    Кодирует P-кадр, используя предыдущий кадр и матрицу квантования.
+    sys.stderr.write(f'\nСохраняю результат кодирования в файл data.bin \n')
 
-    :param prev_frame: Предыдущий кадр
-    :param current_frame: Текущий кадр
-    :param quant_matrix: Матрица квантования
-    :return: Кодированный кадр
-    """
-    # Вычисление оптического потока и создание предсказанного P-кадра
-    flow = calculate_optical_flow_farneback(prev_frame, current_frame)
-    predicted_frame = predict_p_frame_from_flow(prev_frame, flow)
-    # Вычисление разности между текущим кадром и предсказанным
-    frame_diff = cv2.absdiff(current_frame, predicted_frame)
-
-    height, width = frame_diff.shape
-    all_rle_blocks = []
-    all_data_for_huffman = []
-
-    # Разбиение frame_diff на блоки 8x8 и их обработка
-    for i in range(0, height, 8):
-        for j in range(0, width, 8):
-            block = frame_diff[i:i + 8, j:j + 8]
-            padded_block = pad_block_to_8x8(block)
-            quantized_block = dct_quantize_block(padded_block, quant_matrix, use_scale_factor=True)
-            zigzagged_block = zigzag_scan(quantized_block)
-            rle_block = run_length_encode(zigzagged_block)
-            all_rle_blocks.append(rle_block)
-            all_data_for_huffman.extend(rle_block)
-
-    # Создание общей таблицы Хаффмана для всех блоков кадра
-    huffman_table = huffman_encoding(all_data_for_huffman)
-    # Кодирование блоков с использованием общей таблицы Хаффмана
-    encoded_blocks = []
-    for rle_block in all_rle_blocks:
-        encoded_block = ''
-        for value, count in rle_block:
-            key = (value, count)
-            code = huffman_table.get(key, 'ERROR')  # Безопасно извлекаем код
-            if code == 'ERROR':
-                print("ERROR")
-            encoded_block += code
-        encoded_blocks.append(encoded_block)
-
-    return encoded_blocks, huffman_table
-
-def encode_b_frame(prev_frame: np.ndarray, current_frame: np.ndarray, next_frame: np.ndarray, quant_matrix: np.ndarray) -> np.ndarray:
-    """
-    Кодирует B-кадр, используя предыдущий и последующий кадры.
-
-    :param prev_frame: Предыдущий кадр
-    :param current_frame: Текущий кадр
-    :param next_frame: Последующий кадр
-    :param quant_matrix: Матрица квантования
-    :return: Кодированный кадр
-    """
-    # Вычисление оптического потока к предыдущему и последующему кадрам
-    flow_to_prev = calculate_optical_flow_farneback(current_frame, prev_frame)
-    flow_to_next = calculate_optical_flow_farneback(current_frame, next_frame)
-
-    # Создание предсказанного B-кадра
-    predicted_frame = predict_b_frame(prev_frame, next_frame, flow_to_prev, flow_to_next)
-
-    # Вычисление разности между текущим кадром и предсказанным
-    if len(current_frame.shape) == 3:  # Проверяем, есть ли 3 канала (цветное изображение)
-        frame_diff = cv2.absdiff(cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY),
-                                 cv2.cvtColor(predicted_frame, cv2.COLOR_BGR2GRAY))
-    else:
-        frame_diff = cv2.absdiff(current_frame, predicted_frame)  # Изображение уже в градациях серого
-
-    # Кодирование разности кадров с использованием DCT и квантования
-    encoded_frame = encode_p_frame(predicted_frame, frame_diff,
-                                            quant_matrix)  # Используем ту же функцию, что и для P-кадров
-
-    return encoded_frame
-
-def encode_frame_by_type(
-        y: np.ndarray,
-        u: np.ndarray,
-        v: np.ndarray,
-        frame_type: str,
-        quant_matrix_Y: np.ndarray,
-        quant_matrix_UV: np.ndarray,
-        prev_frames: tuple = None,
-        next_frame: np.ndarray = None
-) -> tuple:
-    if frame_type == 'I':
-        encoded_y, huffman_table_y = encode_i_frame(y, quant_matrix_Y)
-        encoded_u, huffman_table_u = encode_i_frame(u, quant_matrix_UV)
-        encoded_v, huffman_table_v = encode_i_frame(v, quant_matrix_UV)
-        huffman_tables = (huffman_table_y, huffman_table_u, huffman_table_v)
-    elif frame_type == 'P':
-        assert prev_frames is not None, "Previous frame is required for P frame encoding"
-        prev_y, prev_u, prev_v = prev_frames
-        encoded_y, huffman_table_y = encode_p_frame(prev_y, y, quant_matrix_Y)
-        encoded_u, huffman_table_u = encode_p_frame(prev_u, u, quant_matrix_UV)
-        encoded_v, huffman_table_v = encode_p_frame(prev_v, v, quant_matrix_UV)
-        huffman_tables = (huffman_table_y, huffman_table_u, huffman_table_v)
-    elif frame_type == 'B':
-        assert prev_frames is not None and next_frame is not None, "Previous and next frames are required for B frame encoding"
-        prev_y, prev_u, prev_v = prev_frames
-        next_y, next_u, next_v = next_frame
-        encoded_y, huffman_table_y = encode_b_frame(prev_y, next_y, y, quant_matrix_Y)
-        encoded_u, huffman_table_u = encode_b_frame(prev_u, next_u, u, quant_matrix_UV)
-        encoded_v, huffman_table_v = encode_b_frame(prev_v, next_v, v, quant_matrix_UV)
-        huffman_tables = (huffman_table_y, huffman_table_u, huffman_table_v)
-    else:
-        raise ValueError("Unsupported frame type")
-
-    return (encoded_y, encoded_u, encoded_v), huffman_tables
-
-def encode_sequence(frames: list, frame_types: list, quant_matrix_Y: np.ndarray, quant_matrix_UV: np.ndarray) -> tuple:
-    """
-    Закодировать последовательность кадров.
-
-    :param frames: Список кадров
-    :param frame_types: Список типов кадров
-    :param quant_matrix_Y: Матрица квантования для Y-канала
-    :param quant_matrix_UV: Матрица квантования для UV-канала
-    :return: Список закодированных кадров и таблицы Хаффмана
-    """
-    encoded_frames = []
-    huffman_tables_list = []
-    for i, ((y, u, v), frame_type) in enumerate(zip(frames, frame_types)):
-        print_progress_bar(i * 100 / len(frames), 100, prefix='Происходит кодирование кадров:', suffix='Готово', length=50)
-        prev_frames = (frames[i - 1][0], frames[i - 1][1], frames[i - 1][2]) if i > 0 else None
-        next_frame = (frames[i + 1][0], frames[i + 1][1], frames[i + 1][2]) if i < len(frames) - 1 else None
-
-        (encoded_y, encoded_u, encoded_v), huffman_tables = encode_frame_by_type(y, u, v, frame_type, quant_matrix_Y, quant_matrix_UV, prev_frames, next_frame)
-
-        encoded_frames.append((encoded_y, encoded_u, encoded_v))
-        huffman_tables_list.append(huffman_tables)
-
-    print_progress_bar(100, 100, prefix='Обрабатываются закодированные кадры:', suffix='Готово', length=50)
-    return encoded_frames, huffman_tables_list
-
-def prepare_data_for_json(data: dict | list | tuple) -> dict | list | tuple:
-    """
-    Рекурсивно преобразует ключи в словарях из кортежей в строки для сериализации JSON.
-
-    :param data: Словарь, список или кортеж
-    :return: Словарь, список или кортеж
-    """
-    if isinstance(data, dict):
-        # Обработка словаря: преобразование всех ключей в строки
-        return {str(key): prepare_data_for_json(value) for key, value in data.items()}
-    elif isinstance(data, list):
-        # Обработка списка: рекурсивная обработка каждого элемента
-        return [prepare_data_for_json(item) for item in data]
-    elif isinstance(data, tuple):
-        # Обработка кортежа: рекурсивная обработка каждого элемента кортежа
-        return tuple(prepare_data_for_json(item) for item in data)
-    else:
-        return data
-
-
-def pack_to_file(
-        encoded_frames: list,
-        huffman_tables_list: list,
-        file_path: str,
-        height: int,
-        width: int,
-        frame_types: list,
-        quant_matrix_Y: np.ndarray,
-        quant_matrix_UV: np.ndarray
-) -> None:
-    """
-    Запаковать закодированные данные и таблицы Хаффмана в JSON-файл.
-
-    :param encoded_frames: Закодированные кадры
-    :param huffman_tables_list: Список таблиц Хаффмана
-    :param file_path: Путь к JSON-файлу
-    :param height: Высота изображения
-    :param width: Ширина изображения
-    :param frame_types: Список типов кадров
-    :param quant_matrix_Y: Матрица квантования для Y-канала
-    :param quant_matrix_UV: Матрица квантования для UV-канала
-    :return: None
-    """
-    quant_matrix_Y_list = quant_matrix_Y.tolist() if isinstance(quant_matrix_Y, np.ndarray) else quant_matrix_Y
-    quant_matrix_UV_list = quant_matrix_UV.tolist() if isinstance(quant_matrix_UV, np.ndarray) else quant_matrix_UV
-
-    # Подготовка данных Huffman и других данных для сериализации
-    prepared_data = prepare_data_for_json({
-        "height": height,
-        "width": width,
-        "huffman_tables": huffman_tables_list,
-        "encoded_frames": encoded_frames,
-        "frame_types": frame_types,
-        "quant_matrix_Y": quant_matrix_Y_list,
-        "quant_matrix_UV": quant_matrix_UV_list,
-    })
-    total_iterations = 2  # Два этапа: подготовка данных и запись в файл
-
+    total_iterations = 2
     # Сериализация данных в байты с использованием pickle
-    serialized_data = pickle.dumps(prepared_data)
+    serialized_data = pickle.dumps(mpeg)
 
     print_progress_bar(1, total_iterations, prefix='Сериализация данных:', suffix='Готово', length=50)
 
     # Сжатие данных
     compressed_data = gzip.compress(serialized_data)
+    with open('data.bin', 'wb') as file:
+        file.write(compressed_data)
     print_progress_bar(2, total_iterations, prefix=' Запись данных:', suffix='Готово', length=50)
 
-    # Запись данных в файл в бинарном режиме
-    with open(file_path, 'wb') as file:
-        file.write(compressed_data)
+    sys.stderr.write(f'\nКоэффициент сжатия: {compare_folder_and_file_size("data/frames", "data.bin")}\n')
 
-    sys.stderr.write(f"\n Данные успешно записаны в файл '{file_path}'\n")
-
-
-
-
-def pack_encoded_data_to_mdat_content(encoded_frames: list, huffman_tables_list: list) -> bytearray:
-    """
-    Объединяет закодированные данные и таблицы Хаффмана в один байтовый поток для 'mdat'.
-
-    :param encoded_frames: Закодированные кадры
-    :param huffman_tables_list: Список таблиц Хаффмана
-    :return: Байтовый поток для 'mdat'
-    """
-    mdat_content = bytearray()
-
-    # Обработка закодированных кадров
-    for frame in encoded_frames:
-        for channel in frame:  # channel представляет собой список строк с бинарными данными
-            for binary_str in channel:
-                if binary_str:
-                    # Преобразование бинарной строки в байты и добавление в mdat_content
-                    num_bytes = (len(binary_str) + 7) // 8
-                    byte_data = int(binary_str, 2).to_bytes(num_bytes, 'big')
-                    mdat_content.extend(byte_data)
-
-    # Обработка таблиц Хаффмана
-    for table in huffman_tables_list:
-        for value_tuple in table:  # value_tuple - это словарь вида (значение, код)
-            for value, code in value_tuple.items():  # Итерация по парам ключ-значение
-                if value:  # Проверка на непустое значение
-                    value_bytes = float(value).hex().encode('utf-8')  # Предполагаем, что значение - это float
-                    mdat_content.extend(value_bytes)
-                if code:  # Проверка на непустой код
-                    code_bytes = code.encode('utf-8')
-                    mdat_content.extend(code_bytes)
-
-    return mdat_content
-
-def play_video(frames):
-    for frame in frames:
-        cv2.imshow('Video Playback', frame)
-        # Ждем нажатия клавиши
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):  # Выход при нажатии 'q'
-            break
-    cv2.destroyAllWindows()
-
-def save_encoded_frames(encoded_frames, save_folder, gif_filename='input_animation.gif', fps=25):
-    """
-    Сохраняет декодированные кадры в указанную папку.
-
-    :param decoded_frames: Список декодированных кадров.
-    :param save_folder: Путь к папке для сохранения кадров.
-    """
-    if not os.path.exists(save_folder):
-        os.makedirs(save_folder)
-    jpeg_folder = 'data/frames_Q90'
-    if not os.path.exists(jpeg_folder):
-        os.makedirs(jpeg_folder)
-
-    for i, frame in enumerate(encoded_frames):
-        print_progress_bar(i + 1, len(encoded_frames), prefix='Сохраняю кадры:', suffix='Готово', length=50)
-        jpeg_filename = os.path.join(jpeg_folder, f"frame_{i:03d}.jpg")
-        imageio.imwrite(jpeg_filename, frame[:, :, ::-1], format='JPEG', quality=90)
-        filename = os.path.join(save_folder, f"frame_{i:03d}.png")
-        cv2.imwrite(filename, frame)
-
-    # Создаем анимацию GIF из сохраненных кадров
-    frame_files = sorted([f for f in os.listdir(save_folder) if f.endswith('.png')])
-    images = [imageio.imread(os.path.join(save_folder, filename)) for filename in frame_files]
-    imageio.mimsave(gif_filename, images, fps=fps)
-    sys.stderr.write(f"Сохраняю GIF-анимацию входных данных с именем '{gif_filename}'\n")
-
-
-def get_folder_size(folder_path: str) -> int:
-    """
-    Вычисляет общий размер файлов в папке и её подпапках.
-
-    :param folder_path: Путь к папке
-    :return: Размер папки в байтах
-    """
-    total_size = 0
-    for dirpath, dirnames, filenames in os.walk(folder_path):
-        for filename in filenames:
-            file_path = os.path.join(dirpath, filename)
-            # Суммируем размеры файлов
-            total_size += os.path.getsize(file_path)
-    return total_size
-
-def compare_folder_and_file_size(folder_path: str, file_path: str) -> int:
-    """
-    Сравнивает размер папки с размером файла.
-    :param folder_path: Путь к папке
-    :param file_path: Путь к файлу
-    :return: Разница в размере в байтах (положительное число означает, что папка больше)
-    """
-    folder_size = get_folder_size(folder_path)
-    file_size = os.path.getsize(file_path)
-
-    sys.stderr.write(f"Размер папки: {folder_size} байт\n")
-    sys.stderr.write(f"Размер файла '{file_path}': {file_size} байт\n")
-
-    return folder_size / file_size
-
-if __name__ == '__main__':
-
-    folder_path = 'data/frames/'
-    # height, width = 240, 320
-    height, width = 1920, 1080
-    # height, width = 1920, 3840
-    frames = extract_frames(folder_path, height, width)
-    frames_yuv = convert_frames_to_yuv(frames)
-
-    save_encoded_frames(frames, "data/encoded_frames/")
-
-    subsampled_frames = apply_subsampling(frames_yuv)
-
-    # subsampled_frames = apply_no_subsampling(frames_yuv)
-
-    # Создаем список, содержащий только каналы Y из субдискретизированных кадров
-    y_frames = [frame[0] for frame in subsampled_frames]
-
-    frame_types = get_frame_types(y_frames)
-
-    sys.stderr.write(f'Типы кадров: {frame_types} \n')
-
-    encoded_frames, huffman_tables_list = encode_sequence(subsampled_frames, frame_types, quant_matrix_Y,
-                                                          quant_matrix_UV)
-
-    pack_to_file(
-        encoded_frames,
-        huffman_tables_list,
-        "data.bin",
-        height,
-        width,
-        frame_types,
-        quant_matrix_Y,
-        quant_matrix_UV,
-    )
-
-    sys.stderr.write(f'Коэффициент сжатия: {compare_folder_and_file_size("data/frames", "data.bin")}')

@@ -190,30 +190,33 @@ def get_frame_types(frames: list) -> list:
     adaptive_threshold_sad, adaptive_threshold_flow, adaptive_threshold_b_frame = calculate_adaptive_thresholds(frames)
 
     # Первый кадр уже помечен как I-кадр
-    for i in range(1, len(frames)):
-        frame_types.append('I')
+    # for i in range(1, len(frames)):
+    #     frame_types.append('I')
 
-    # # Первый кадр уже помечен как I-кадр
-    # for i in range(1, len(frames) - 1):
-    #     if i % 10 == 0:
-    #         # Каждый 10-й кадр устанавливается как I-кадр
-    #         frame_types.append('I')
-    #     else:
-    #         # Для остальных кадров определяем тип
-    #         prev_frame = frames[i - 1]
-    #         current_frame = frames[i]
-    #         next_frame = frames[i + 1]
-    #
-    #         frame_type = determine_frame_type(prev_frame, current_frame, next_frame, adaptive_threshold_sad,
-    #                                           adaptive_threshold_flow, adaptive_threshold_b_frame)
-    #         if (i % 3 == 0) and (frame_type == 'B'):
-    #             frame_types.append('P')
-    #         else:
-    #             frame_types.append(frame_type)
-    #
-    # last_frame_type = determine_last_frame_type(frames[-2], frames[-1], adaptive_threshold_sad, adaptive_threshold_flow)
-    # frame_types.append(last_frame_type)
+    # Первый кадр уже помечен как I-кадр
+    for i in range(1, len(frames) - 1):
+        if i % 10 == 0:
+            # Каждый 10-й кадр устанавливается как I-кадр
+            frame_types.append('I')
+        else:
+            # Для остальных кадров определяем тип
+            prev_frame = frames[i - 1]
+            current_frame = frames[i]
+            next_frame = frames[i + 1]
 
-    return frame_types
+            frame_type = determine_frame_type(prev_frame, current_frame, next_frame, adaptive_threshold_sad,
+                                              adaptive_threshold_flow, adaptive_threshold_b_frame)
+            if (i % 3 == 0) and (frame_type == 'B'):
+                frame_types.append('P')
+            else:
+                frame_types.append(frame_type)
+
+    last_frame_type = determine_last_frame_type(frames[-2], frames[-1], adaptive_threshold_sad, adaptive_threshold_flow)
+    frame_types.append(last_frame_type)
+
+    frame_types_str = "".join(frame_types)
+
+    return frame_types, frame_types_str
+
 
 
