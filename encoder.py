@@ -66,12 +66,13 @@ def extract_frames(folder_path: str, height: int, width: int) -> list:
 
     return frames
 
-def encode_frames(frames):
+def encode_frames(frames, scale):
     """
     Кодирует видеоролик, используя заданный шаблон типов кадров.
 
     Аргументы:
     frames -- входной видеоролик в формате RGB.
+    scale -- масштаб качества.
 
     Возвращает:
     mpeg -- список с закодированными данными каждого кадра.
@@ -102,7 +103,7 @@ def encode_frames(frames):
         frame_type = frame_types[i % len(frame_types)]
 
         # Кодирование кадра
-        encoded_frame, prev_frame = encframe(frame, frame_type, prev_frame)
+        encoded_frame, prev_frame = encode_frame(frame, frame_type, prev_frame, scale)
 
         # Сохраняем результат
         mpeg.append(encoded_frame)
@@ -111,7 +112,7 @@ def encode_frames(frames):
 
     return mpeg
 
-def encframe(frame, frame_type, prev_frame):
+def encode_frame(frame, frame_type, prev_frame, scale=32):
     """
     Кодирует кадр, разбивая его на макроблоки и кодируя каждый макроблок.
 
@@ -119,6 +120,7 @@ def encframe(frame, frame_type, prev_frame):
     frame -- текущий кадр для кодирования.
     frame_type -- тип кадра ('I' или 'P').
     prev_frame -- предыдущий кадр.
+    scale -- масштаб качества.
 
     Возвращает:
     mpeg -- массив со структурами данных для каждого макроблока.
@@ -146,12 +148,12 @@ def encframe(frame, frame_type, prev_frame):
             y_range = slice(y, y + 16)
 
             # Кодируем макроблок
-            mpeg[m, n], encoded_frame[x_range, y_range, :] = encmacroblock(
-                frame[x_range, y_range, :], frame_type, prev_frame, prev_frame_y, x, y)
+            mpeg[m, n], encoded_frame[x_range, y_range, :] = encode_block(
+                frame[x_range, y_range, :], frame_type, prev_frame, prev_frame_y, x, y, scale)
 
     return mpeg, encoded_frame
 
-def encmacroblock(block, frame_type, prev_frame, prev_frame_y, x, y):
+def encode_block(block, frame_type, prev_frame, prev_frame_y, x, y, scale):
     """
     Кодирование макроблока.
 
@@ -161,6 +163,7 @@ def encmacroblock(block, frame_type, prev_frame, prev_frame_y, x, y):
     prev_frame -- предыдущий кадр.
     prev_frame_y -- яркостная компонента предыдущего кадра.
     x, y -- координаты начала макроблока.
+    scale -- масштаб качества.
 
     Возвращает:
     mpeg -- структура данных с информацией о макроблоке.
@@ -168,9 +171,6 @@ def encmacroblock(block, frame_type, prev_frame, prev_frame_y, x, y):
     """
     # Квантовые матрицы
     q1, q2 = quant_matrix_I(), quant_matrix_PB()[1]  # используем вторую матрицу из qinter
-
-    # Масштабирование качества
-    scale = 31
 
     # Инициализация структуры MPEG
     mpeg = {
@@ -186,7 +186,7 @@ def encmacroblock(block, frame_type, prev_frame, prev_frame_y, x, y):
     # Нахождение векторов движения для P-кадров
     if frame_type == 'P':
         mpeg['type'] = 'P'
-        mpeg, error_block = getmotionvec(mpeg, block, prev_frame, prev_frame_y, x, y)
+        mpeg, error_block = get_motion_vectors(mpeg, block, prev_frame, prev_frame_y, x, y)
         block = error_block  # используем блок ошибки для кодирования
         q = q2
     else:
@@ -217,11 +217,11 @@ def encmacroblock(block, frame_type, prev_frame, prev_frame_y, x, y):
         mpeg['huffman_tree'].append(huffman_tree)
 
     # Декодирование этого макроблока для использования в будущем P-кадре
-    decoded_block = decmacroblock(mpeg, prev_frame, x, y)
+    decoded_block = decode_block(mpeg, prev_frame, x, y)
 
     return mpeg, decoded_block
 
-def decmacroblock(mpeg, prev_frame, x, y):
+def decode_block(mpeg, prev_frame, x, y):
     """
     Декодирование макроблока из MPEG потока.
 
@@ -321,7 +321,7 @@ def getblocks(block):
     return b
 
 
-def getmotionvec(mpeg, block, prev_frame, prev_frame_y, x, y):
+def get_motion_vectors(mpeg, block, prev_frame, prev_frame_y, x, y):
     """
     Получение векторов движения для макроблока.
 
@@ -391,14 +391,17 @@ if __name__ == '__main__':
 
     # Loading the video
     folder_path = 'data/frames/'
+    # height, width = 240, 320
     height, width = 1920, 1080
+    # height, width = 1920, 3840
     frames = get_frames(folder_path, height, width, frames_quantity)
+    # Масштаб качества
+    scale = 32
+    sys.stderr.write("\nМасштаб качества: " + str(scale) + " \n")
 
     # Encoding
     start_time = time.time()
-    mpeg = encode_frames(frames)
-    encode_time = time.time() - start_time
-    sys.stderr.write(f'\nОбщее время кодирования: {sec2timestr(encode_time)}\n')
+    mpeg = encode_frames(frames, scale)
 
     sys.stderr.write(f'\nСохраняю результат кодирования в файл data.bin \n')
 
@@ -413,6 +416,9 @@ if __name__ == '__main__':
     with open('data.bin', 'wb') as file:
         file.write(compressed_data)
     print_progress_bar(2, total_iterations, prefix=' Запись данных:', suffix='Готово', length=50)
+
+    encode_time = time.time() - start_time
+    sys.stderr.write(f'\nОбщее время кодирования: {sec2timestr(encode_time)}\n')
 
     sys.stderr.write(f'\nКоэффициент сжатия: {compare_folder_and_file_size("data/frames", "data.bin")}\n')
 

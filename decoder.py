@@ -36,7 +36,7 @@ def unpack_from_file(file_path: str):
 
 
 
-def decmpeg(mpeg):
+def decode_frames(mpeg):
     """
     Декодирует MPEG поток в видеоролик.
 
@@ -56,7 +56,7 @@ def decmpeg(mpeg):
     # Декодирование каждого фрейма
     for i in range(len(mpeg)):
         # Декодирование фрейма
-        f = decframe(mpeg[i], pf)
+        f = decode_frame(mpeg[i], pf)
 
         # Сохранение предыдущего фрейма
         pf = f.copy()
@@ -70,11 +70,11 @@ def decmpeg(mpeg):
         # Сохранение фрейма в массив видеоролика
         mov[:, :, :, i] = f.astype(np.uint8)
 
-        print_progress_bar((i+1) * 100 / len(mpeg), 100, prefix='Происходит кодирование кадров:', suffix='Готово', length=50)
+        print_progress_bar((i+1) * 100 / len(mpeg), 100, prefix='Происходит декодирование кадров:', suffix='Готово', length=50)
 
     return mov
 
-def decframe(mpeg, pf):
+def decode_frame(mpeg, pf):
     """
     Декодирует кадр из MPEG потока.
 
@@ -101,12 +101,12 @@ def decframe(mpeg, pf):
             y = slice(16 * n, 16 * (n + 1))
 
             # Декодирование макроблока и помещение его в кадр
-            fr[x, y, :] = decmacroblock(mpeg[m, n], pf, 16 * m, 16 * n)
+            fr[x, y, :] = decode_block(mpeg[m, n], pf, 16 * m, 16 * n)
 
     return fr
 
 
-def decmacroblock(mpeg, pf, x, y):
+def decode_block(mpeg, pf, x, y):
     """
     Декодирование макроблока из MPEG потока.
 
@@ -301,7 +301,7 @@ if __name__ == '__main__':
 
     # Decoding
     start_time = time.time()
-    mov2 = decmpeg(mpeg)
+    mov2 = decode_frames(mpeg)
     decode_time = time.time() - start_time
     sys.stderr.write(f'\nОбщее время декодирования: {sec2timestr(decode_time)}\n')
 

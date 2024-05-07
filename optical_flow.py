@@ -124,3 +124,4 @@ def horn_schunck(Image1: np.ndarray, Image2: np.ndarray, lamda: float) -> list[n
     I = [Ix, Iy, It]
 
     return flow, I
+
