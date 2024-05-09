@@ -24,7 +24,7 @@ def get_frames(folder_path, height, width, frames_quantity):
     frames -- данные видео в формате numpy массива.
     """
 
-    frames = extract_frames(folder_path, height, width)
+    frames = extract_frames(folder_path, height, width, frames_quantity)
     save_encoded_frames(frames, "data/encoded_frames/")
 
     # Преобразуем список кадров в 4D numpy массив
@@ -32,22 +32,21 @@ def get_frames(folder_path, height, width, frames_quantity):
 
     return frames
 
-def extract_frames(folder_path: str, height: int, width: int) -> list:
+def extract_frames(folder_path: str, height: int, width: int, frames_quantity: int) -> list:
     """
     Извлекает изображения из указанной папки.
 
     param folder_path: Путь к папке с изображениями
     param height: Высота изображения
     param width: Ширина изображения
+    param frames_quantity: Количество изображений
     return: Список изображений
     """
     # Список для хранения кадров
     frames = []
 
     # Цикл по номерам кадров
-    # for i in range(1, 12):
-    for i in range(21, 30):
-    # for i in range(65, 96):
+    for i in range(1, frames_quantity+1):
         # Формируем имя файла RAW
         file_path = os.path.join(folder_path, f'frame_{i}.RAW')
 
@@ -383,7 +382,12 @@ if __name__ == '__main__':
 
     sys.stderr.write("\nРеализация кодирования MPEG2 by DB\n")
 
-    frames_quantity = 0
+    # Параметры видео
+    height, width = 240, 320
+    # height, width = 1920, 1080
+    # height, width = 1920, 3840
+    frames_quantity = 1076
+
     if frames_quantity == 0:
         sys.stderr.write("\nКодируем все кадры \n")
     else:
@@ -391,9 +395,6 @@ if __name__ == '__main__':
 
     # Loading the video
     folder_path = 'data/frames/'
-    # height, width = 240, 320
-    height, width = 1920, 1080
-    # height, width = 1920, 3840
     frames = get_frames(folder_path, height, width, frames_quantity)
     # Масштаб качества
     scale = 32

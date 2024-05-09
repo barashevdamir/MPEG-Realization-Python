@@ -99,7 +99,6 @@ def decode_frame(mpeg, pf):
             # Вычисляем координаты в кадре для текущего макроблока
             x = slice(16 * m, 16 * (m + 1))
             y = slice(16 * n, 16 * (n + 1))
-
             # Декодирование макроблока и помещение его в кадр
             fr[x, y, :] = decode_block(mpeg[m, n], pf, 16 * m, 16 * n)
 
@@ -125,7 +124,10 @@ def decode_block(mpeg, pf, x, y):
 
     # Предсказание с использованием векторов движения
     if mpeg['type'] == 'P':
-        block = pf[x + mpeg['mvx'] : x + mpeg['mvx'] + 16, y + mpeg['mvy'] : y + mpeg['mvy'] + 16, :]
+        # Получаем предсказанный блок из предыдущего кадра
+        predicted_block = pf[x + mpeg['mvx']: x + mpeg['mvx'] + 16, y + mpeg['mvy']: y + mpeg['mvy'] + 16, :]
+        # Обеспечиваем, что размеры совпадают
+        block[:predicted_block.shape[0], :predicted_block.shape[1], :] = predicted_block
         q = q2
     else:
         q = q1
@@ -148,7 +150,7 @@ def decode_block(mpeg, pf, x, y):
 
 
     # Конструкция макроблока
-    block += putblocks(b)  # предполагается, что putblocks правильно собирает блоки
+    block += putblocks(b)
 
     return block
 
@@ -165,16 +167,18 @@ def putblocks(b):
     # Создаем пустой макроблок
     block = np.zeros((16, 16, 3))
 
-    # Четыре блока яркости
-    block[0:8, 0:8, 0] = b[:,:,0]   # Верхний левый
-    block[0:8, 8:16, 0] = b[:,:,1]  # Верхний правый
-    block[8:16, 0:8, 0] = b[:,:,2]  # Нижний левый
-    block[8:16, 8:16, 0] = b[:,:,3] # Нижний правый
+    # Заполняем яркостные блоки
+    for i in range(4):  # Для четырех блоков яркости
+        row = (i // 2) * 8
+        col = (i % 2) * 8
+        if b.shape[2] > i:  # Проверяем, что блок существует
+            block[row:row+8, col:col+8, 0] = b[:, :, i]
 
-    # Два подвыборочных блока цветности
-    z = np.array([[1, 1], [1, 1]])
-    block[:, :, 1] = np.kron(b[:, :, 4], z)  # Кронекер для Cb
-    block[:, :, 2] = np.kron(b[:, :, 5], z)  # Кронекер для Cr
+    # Заполняем блоки цветности
+    if b.shape[2] > 4:  # Кронекерово произведение для блока Cb
+        block[:, :, 1] = np.kron(b[:, :, 4], np.ones((2, 2)))
+    if b.shape[2] > 5:  # Кронекерово произведение для блока Cr
+        block[:, :, 2] = np.kron(b[:, :, 5], np.ones((2, 2)))
 
     return block
 

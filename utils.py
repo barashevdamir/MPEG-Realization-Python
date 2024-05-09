@@ -319,7 +319,7 @@ def idct(dct_block: np.ndarray) -> np.ndarray:
 
     return output_block
 
-def rgb2yuv(rgb):
+def rgb2yuv(rgb: np.ndarray) -> np.ndarray:
     """
     Конвертация из RGB в YCbCr.
 

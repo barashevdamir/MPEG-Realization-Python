@@ -16,7 +16,7 @@ def build_huffman_tree(symbol_freq):
     return sorted(heapq.heappop(heap)[1:], key=lambda p: (len(p[1]), p))
 
 def huffman_encode(rle_encoded, tree):
-    """ Кодирует список кортежей (значение, количество) по дереву Хаффмана, включая количество."""
+    """ Кодирует список кортежей (значение, счетчик) по дереву Хаффмана, включая количество."""
     huffman_code = {sym: code for sym, code in tree}
     encoded = []
     for value, count in rle_encoded:
